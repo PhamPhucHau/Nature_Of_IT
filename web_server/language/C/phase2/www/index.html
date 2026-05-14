@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTTP Server - Phase 2</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .info {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            margin: 20px 0;
+        }
+        .info h2 {
+            color: #007bff;
+            margin-top: 0;
+        }
+        code {
+            background-color: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        .status-ok {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status-error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <h1>HTTP Server - Phase 2</h1>
+    
+    <div class="info">
+        <h2>Status</h2>
+        <span class="status status-ok">✓ Server Running</span>
+    </div>
+    
+    <div class="info">
+        <h2>Features Implemented</h2>
+        <ul>
+            <li><strong>HTTP Request Parsing</strong> - Parses method, path, version, and headers</li>
+            <li><strong>HTTP Response Building</strong> - Builds proper HTTP responses with headers</li>
+            <li><strong>Static File Serving</strong> - Serves HTML, CSS, JS, and image files</li>
+            <li><strong>Content-Type Detection</strong> - Automatically detects file types</li>
+            <li><strong>404 Error Handling</strong> - Returns proper 404 responses</li>
+            <li><strong>Multi-threaded</strong> - Handles multiple clients concurrently</li>
+        </ul>
+    </div>
+    
+    <div class="info">
+        <h2>Testing</h2>
+        <p>Test the server with these commands:</p>
+        <pre><code># Start the server
+make run
+
+# Test with curl
+curl http://localhost:8080/
+curl http://localhost:8080/404.html
+
+# Test different content types
+curl -H "Accept: text/html" http://localhost:8080/
+curl -H "Accept: application/json" http://localhost:8080/api</code></pre>
+    </div>
+    
+    <div class="info">
+        <h2>HTTP Methods Supported</h2>
+        <ul>
+            <li>GET - Retrieve resources</li>
+            <li>POST - Submit data</li>
+            <li>PUT - Update resources</li>
+            <li>DELETE - Remove resources</li>
+            <li>HEAD - Get headers only</li>
+            <li>OPTIONS - Get options</li>
+            <li>PATCH - Partial updates</li>
+        </ul>
+    </div>
+</body>
+</html>

@@ -1,0 +1,305 @@
+{
+	"info": {
+		"_postman_id": "http-server-phase2-test",
+		"name": "HTTP Server Phase 2 - Test Collection",
+		"description": "Test suite for HTTP Server Phase 2 implementation\n\nThis collection tests all HTTP features including:\n- Request parsing\n- Response building\n- Static file serving\n- Content-Type detection\n- Error handling",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/",
+					"host": ["{{base_url}}"],
+					"path": [""]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get HTML Page",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Accept",
+						"value": "text/html"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/",
+					"host": ["{{base_url}}"],
+					"path": [""]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get 404 Error",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/nonexistent.html",
+					"host": ["{{base_url}}"],
+					"path": ["nonexistent.html"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "HEAD Request",
+			"request": {
+				"method": "HEAD",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/",
+					"host": ["{{base_url}}"],
+					"path": [""]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "OPTIONS Request",
+			"request": {
+				"method": "OPTIONS",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/",
+					"host": ["{{base_url}}"],
+					"path": [""]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "POST Request",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/x-www-form-urlencoded"
+					}
+				],
+				"body": {
+					"mode": "urlencoded",
+					"urlencoded": [
+						{
+							"key": "name",
+							"value": "Test User",
+							"type": "text"
+						},
+						{
+							"key": "email",
+							"value": "test@example.com",
+							"type": "text"
+						}
+					]
+				},
+				"url": {
+					"raw": "{{base_url}}/submit",
+					"host": ["{{base_url}}"],
+					"path": ["submit"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get CSS File",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/styles.css",
+					"host": ["{{base_url}}"],
+					"path": ["styles.css"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get JavaScript File",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/app.js",
+					"host": ["{{base_url}}"],
+					"path": ["app.js"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get JSON Data",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Accept",
+						"value": "application/json"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/data.json",
+					"host": ["{{base_url}}"],
+					"path": ["data.json"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get PNG Image",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/image.png",
+					"host": ["{{base_url}}"],
+					"path": ["image.png"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get SVG Image",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/logo.svg",
+					"host": ["{{base_url}}"],
+					"path": ["logo.svg"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get Text File",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/readme.txt",
+					"host": ["{{base_url}}"],
+					"path": ["readme.txt"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "PUT Request",
+			"request": {
+				"method": "PUT",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"name\": \"Updated Name\",\n  \"email\": \"updated@example.com\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/update",
+					"host": ["{{base_url}}"],
+					"path": ["update"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "DELETE Request",
+			"request": {
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/delete",
+					"host": ["{{base_url}}"],
+					"path": ["delete"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "PATCH Request",
+			"request": {
+				"method": "PATCH",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"name\": \"Patch Name\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/patch",
+					"host": ["{{base_url}}"],
+					"path": ["patch"]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Request with Query Parameters",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/search?q=test&page=1",
+					"host": ["{{base_url}}"],
+					"path": ["search"],
+					"query": [
+						{
+							"key": "q",
+							"value": "test"
+						},
+						{
+							"key": "page",
+							"value": "1"
+						}
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Request with Custom Headers",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "X-Custom-Header",
+						"value": "test-value"
+					},
+					{
+						"key": "User-Agent",
+						"value": "TestClient/1.0"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/",
+					"host": ["{{base_url}}"],
+					"path": [""]
+				}
+			},
+			"response": []
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8080",
+			"type": "string"
+		}
+	]
+}
