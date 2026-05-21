@@ -50,7 +50,7 @@ void http_response_add_header(HttpResponse *resp, const char *name, const char *
 // Set response body
 void http_response_set_body(HttpResponse *resp, const char *body, size_t length) {
     resp->body = (char*)malloc(length + 1);
-    strncpy(resp->body, body, length);
+    memcpy(resp->body, body, length);
     resp->body[length] = '\0';
     resp->body_length = length;
 }
@@ -148,10 +148,11 @@ HttpResponse* http_serve_file(const char *filepath) {
     // Set response
     http_response_set_status(resp, 200, "OK");
     http_response_add_header(resp, "Content-Type", http_get_content_type(filepath));
-    http_response_add_header(resp, "Content-Length", (char*)malloc(20));  // Will be set below
+    
     char length_str[20];
     sprintf(length_str, "%ld", file_size);
     http_response_add_header(resp, "Content-Length", length_str);
+    
     http_response_set_body(resp, content, read_size);
     
     free(content);

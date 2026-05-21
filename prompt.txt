@@ -1,0 +1,30 @@
+Please help me generate code C and adding more detail about comment and debug that understand about this phase 
+### Phase 1: Key-Value Store (Week 1-2)
+
+**Goal**: Build a simple key-value store with file persistence
+
+#### What You'll Build
+- Basic key-value data structure
+- Serialization/deserialization
+- File I/O operations
+- Simple put/get operations
+
+#### Key Concepts
+- Binary file formats
+- Data serialization
+- File I/O in C++
+- Memory management
+
+#### Files to Create
+```
+phase1/
+├── include/
+│   ├── storage.h
+│   └── serializer.h
+├── src/
+│   ├── storage.cpp
+│   ├── serializer.cpp
+│   └── main.cpp
+├── tests/
+│   └── test_storage.cpp
+└── CMakeLists.txt

@@ -133,8 +133,8 @@ int http_parse_request(const char *request, HttpRequest *req) {
             char *colon = strchr(line, ':');
             if (colon) {
                 *colon = '\0';
-                char *name = strdup(line);
-                char *value = strdup(colon + 1);
+                char *name = line;
+                char *value = colon + 1;
                 
                 // Trim whitespace from value
                 while (*value == ' ' || *value == '\t') value++;
@@ -146,13 +146,10 @@ int http_parse_request(const char *request, HttpRequest *req) {
                 }
                 
                 if (req->header_count < 32) {
-                    req->headers[req->header_count++] = name;
-                    // Store value as part of header string for simplicity
+                    // Store full header string
                     char *full_header = (char*)malloc(strlen(name) + strlen(value) + 3);
                     sprintf(full_header, "%s: %s", name, value);
-                    req->headers[req->header_count - 1] = full_header;
-                    
-                    free(value);
+                    req->headers[req->header_count++] = full_header;
                 }
             }
         }

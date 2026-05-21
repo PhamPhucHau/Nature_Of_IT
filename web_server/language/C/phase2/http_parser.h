@@ -53,5 +53,17 @@ HttpMethod http_method_from_string(const char *str);
 const char* http_method_to_string(HttpMethod method);
 const char* http_get_content_type(const char *path);
 int http_file_exists(const char *path);
+HttpResponse* http_serve_file(const char *filepath);
 
+HttpResponse* http_create_html_response(
+    int status_code,
+    const char *status_text,
+    const char *html_body
+);
+
+HttpResponse* http_create_json_response(
+    int status_code,
+    const char *status_text,
+    const char *json_body
+);
 #endif // HTTP_PARSER_H
