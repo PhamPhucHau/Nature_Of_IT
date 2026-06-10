@@ -541,6 +541,108 @@ void hos_health_check(HumanOS *os) {
 }
 
 /* ─────────────────────────────────────────────────────────────
+ *  hos_optimize() — system optimization pass
+ *  OS: Like kernel tuning and parameter optimization
+ * ──────────────────────────────────────────────────────────── */
+void hos_optimize(HumanOS *os) {
+    if (!os) return;
+
+    char msg[MAX_LOG_MSG];
+
+    /* 1. Task consolidation: group similar tasks */
+    int task_groups[MAX_TASKS] = {0};
+    for (int i = 0; i < os->task_mgr.count; i++) {
+        for (int j = i + 1; j < os->task_mgr.count; j++) {
+            HTask *t1 = &os->task_mgr.tasks[i];
+            HTask *t2 = &os->task_mgr.tasks[j];
+            if (strcmp(t1->category, t2->category) == 0 &&
+                t1->energy_type == t2->energy_type) {
+                task_groups[i]++;
+            }
+        }
+    }
+
+    /* 2. Energy reallocation: move work to peak energy times */
+    float peak_energy = energy_overall(&os->energy);
+    int hour = os->energy.hour_of_day;
+
+    /* Detect peak productivity hours */
+    if (hour >= 9 && hour < 12) {
+        snprintf(msg, sizeof(msg), "OPT: Morning peak detected — scheduling deep work");
+        hos_log(os, 0, msg);
+    } else if (hour >= 14 && hour < 16) {
+        snprintf(msg, sizeof(msg), "OPT: Afternoon recovery — scheduling lighter tasks");
+        hos_log(os, 0, msg);
+    }
+
+    /* 3. Skill prioritization: boost high-value skills */
+    int high_value_skills = 0;
+    for (int i = 0; i < os->skills.count; i++) {
+        if (os->skills.skills[i].level >= SKILL_PROFICIENT) {
+            high_value_skills++;
+        }
+    }
+    if (high_value_skills > 0) {
+        snprintf(msg, sizeof(msg), "OPT: %d expert skills ready for deployment", high_value_skills);
+        hos_log(os, 0, msg);
+    }
+
+    /* 4. Goal momentum: identify goals near completion */
+    for (int i = 0; i < os->life_mgr.goal_count; i++) {
+        HGoal *g = &os->life_mgr.goals[i];
+        if (g->active && g->target > 0) {
+            float pct = g->current / g->target * 100.0f;
+            if (pct >= 80.0f && pct < 100.0f) {
+                snprintf(msg, sizeof(msg), "OPT: Goal '%s' at %.0f%% — push to completion!", g->name, pct);
+                hos_log(os, 0, msg);
+            }
+        }
+    }
+
+    /* 5. Habit streaks: encourage continuation */
+    int active_streaks = 0;
+    for (int i = 0; i < os->life_mgr.habit_count; i++) {
+        if (os->life_mgr.habits[i].streak > 0) active_streaks++;
+    }
+    if (active_streaks > 0) {
+        snprintf(msg, sizeof(msg), "OPT: %d active habit streaks — maintain momentum!", active_streaks);
+        hos_log(os, 0, msg);
+    }
+
+    /* 6. Workload balancing: prevent overload */
+    int pending_tasks = 0;
+    for (int i = 0; i < os->task_mgr.count; i++) {
+        if (os->task_mgr.tasks[i].status == TASK_PENDING) pending_tasks++;
+    }
+    float estimated_hours = 0;
+    for (int i = 0; i < os->task_mgr.count; i++) {
+        if (os->task_mgr.tasks[i].status == TASK_PENDING) {
+            estimated_hours += os->task_mgr.tasks[i].duration_minutes / 60.0f;
+        }
+    }
+
+    if (estimated_hours > os->config_work_hours_per_day * 1.5f) {
+        snprintf(msg, sizeof(msg), "OPT: ALERT — workload %.1fh exceeds daily capacity!", estimated_hours);
+        hos_log(os, 2, msg);
+    }
+
+    /* 7. Energy pattern learning */
+    float avg_mental = 0;
+    for (int i = 0; i < os->energy.history_idx; i++) {
+        avg_mental += os->energy.history_mental[i];
+    }
+    if (os->energy.history_idx > 0) {
+        avg_mental /= os->energy.history_idx;
+        if (avg_mental < 40.0f) {
+            snprintf(msg, sizeof(msg), "OPT: Chronic mental fatigue detected (avg: %.0f%%) — suggest recovery day", avg_mental);
+            hos_log(os, 1, msg);
+        }
+    }
+
+    hos_log(os, 0, "Optimization pass complete");
+}
+
+/* ─────────────────────────────────────────────────────────────
  *  hos_compute_metrics() — calculate system performance metrics
  * ──────────────────────────────────────────────────────────── */
 SystemMetrics hos_compute_metrics(const HumanOS *os) {
