@@ -1,0 +1,1431 @@
+#include "hsmManagement.h"
+#include "defcom.h"
+#include "atmifcom.h"
+#include "nlogging.h"
+
+EXEC SQL INCLUDE SQLCA;      
+
+// char    hsm_sendBuffer[1024];      /* Send Buffer */
+// int     hsm_sndMsgLen = 0;
+// int     hsm_rcvMsgLen = 0;
+// char    hsm_recvBuffer[1024];      /* Recv Buffer */
+
+typedef struct
+{    
+    int     hport;
+    char    haddr[20];
+} s_hostaddr;    
+
+s_hostaddr S_HOSTADDR_HSM[2];
+int hostCnt;    
+  
+
+
+int hsmManagement(hsmManagement_in * input, hsmManagement_out *output )
+{
+	hsmManagementContext __context;  
+    hsmManagementContext *context = &__context;
+	
+	bzero(context, sizeof(hsmManagementContext));   
+    context->input = input;  
+    context->output = output;            
+
+	memset(&s_cmdA6, 0 , sizeof(s_cmdA6));
+	memset(&s_cmdBA, 0 , sizeof(s_cmdBA));
+	memset(&s_cmdCC, 0 , sizeof(s_cmdCC));
+	memset(&s_cmdJE, 0 , sizeof(s_cmdJE));
+	memset(&s_cmdJG, 0 , sizeof(s_cmdJG));
+	memset(&s_cmdM6, 0 , sizeof(s_cmdM6));
+	memset(&s_cmdM8, 0 , sizeof(s_cmdM8));
+	memset(&s_cmdNG, 0 , sizeof(s_cmdNG));
+	memset(&r_cmdA7, 0 , sizeof(r_cmdA7));
+	memset(&r_cmdBB, 0 , sizeof(r_cmdBB));
+	memset(&r_cmdCD, 0 , sizeof(r_cmdCD));     
+	memset(&r_cmdJF, 0 , sizeof(r_cmdJF));
+	memset(&r_cmdJH, 0 , sizeof(r_cmdJH));
+	memset(&r_cmdM7, 0 , sizeof(r_cmdM7));
+	memset(&r_cmdM9, 0 , sizeof(r_cmdM9));
+	memset(&r_cmdNH, 0 , sizeof(r_cmdNH));
+	  
+	if( INPUT->brd_connt_port_no == 0 || strlen(INPUT->tmn_ip) == 0 ){
+		LOGGER(LOG_ERROR, "Remoted Ip/Port is mandatory", "");
+		return ABNORMAL;
+	}     
+	  
+	if(strlen(INPUT->rqst_svc_c) == 0){
+		LOGGER(LOG_ERROR, "Remoted Service ID is mandatory", "");
+		return ABNORMAL;
+	}
+
+	LOGGER(LOG_INFO, "hsmManagement start FUNC[%d -%s]", INPUT->trx_func_d, INPUT->rqst_svc_c);
+	switch(INPUT->trx_func_d)
+	{
+		case TRX_D_IMPORT_ZPKKEY:
+			if(importZpkKey(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_IMPORT_MAKKEY:
+			if(importMakKey(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_GENMAC:
+			if(generateMAC(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_VERMAC:
+			if(verifyMAC(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_TLTPIN_ZPKZPK:
+			if(translatePinZpkToZpk(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_ENCPIN_LMK:
+			if(encPinUnderLmk(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_TLTPIN_LMKZPK:
+			if(translatePinLmkToZpk(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_TLTPIN_ZPKLMK:
+			if(translatePinZpkToLmk(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_DECPIN_LMK:
+			if(decryptPINByLmk(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_DECPIN_SMRT:  
+			if(smartDecrypt(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}  
+		break;
+		case TRX_D_ENCPIN_SMRT:
+			if(smartEncrypt(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}
+		break;
+		case TRX_D_DECPIN_SMRT_NAP:  
+			if(smartDecryptNAP(context) != NORMAL ){
+				memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);
+			}  
+		break;
+		default :
+			LOGGER(LOG_ERROR, "hsmManagement Faile func[%d]",INPUT->trx_func_d);
+			memcpy(OUTPUT->atm_respond_c, "90", sizeof(OUTPUT->atm_respond_c) -1);  
+		break;
+	}    
+	if (context->sockfd_hsm > 0){
+    	close(context->sockfd_hsm);
+    	context->sockfd_hsm = -1;
+    }
+	LOGGER(LOG_INFO, "hsmManagement end FUNC[%d -%s]",INPUT->trx_func_d,OUTPUT->atm_respond_c);
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------  	*/
+/* SUBJECT  : Check response message			                                    */
+/* ARGUMENT :                                                                   	*/
+/*                                                   								*/
+/* RETURN   : SUCCESS: NORMAL                                                   	*/
+/*----------------------------------------------------------------------------		*/
+static long checkResp(hsmManagementContext *context, char *respCode)
+{
+	if(strncmp(context->hsm_recvBuffer + 4, respCode, 2 ) != 0)
+	{
+		return ABNORMAL;
+	}
+	memcpy( context->r_data, context->hsm_recvBuffer, sizeof(context->r_data));
+	memcpy(	context->r_code, &context->hsm_recvBuffer[6], 2 );
+	return NORMAL;
+}
+/*----------------------------------------------------------------------------  	*/
+/* SUBJECT  : Connect to HSM Via PCI queue		                                    */
+/* ARGUMENT :                                                                   	*/
+/*                                                   								*/
+/* RETURN   : SUCCESS: NORMAL                                                   	*/
+/*----------------------------------------------------------------------------		*/
+static long initClientUnixSocket(hsmManagementContext *context, long timeout_ms)
+{  
+	context->sockfd_hsm = -1;
+	char socketPath[300];
+	bzero(&socketPath, sizeof(socketPath));
+	
+	snprintf(socketPath,sizeof(socketPath), "%s%ssckttmp", UNIX_SOCKET_PATH_HSM, INPUT->rqst_svc_c);
+
+	LOGGER(LOG_DEBUG,  " Connection Unix Socket start [%s]",socketPath);
+	context->sockfd_hsm = socket(AF_UNIX, SOCK_STREAM, 0);
+	struct sockaddr_un addr;
+	memset(&addr,0,sizeof(addr));
+	addr.sun_family = AF_UNIX;  
+	memcpy(addr.sun_path, socketPath, sizeof(addr.sun_path));    
+
+	int rc = 0;
+	int sockfd_flags_before;
+	if( ( sockfd_flags_before=fcntl(context->sockfd_hsm, F_GETFL,0) ) < 0 ) return ABNORMAL;
+	if( fcntl( context->sockfd_hsm, F_SETFL, sockfd_flags_before | O_NONBLOCK ) < 0 ) return ABNORMAL;
+	// Start connection asyncronously
+	do{
+		if(connect(context->sockfd_hsm, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+        {
+            //Did connection return an error? If so , we'll fail
+            if( (errno != EWOULDBLOCK) && (errno != EINPROGRESS) ){
+            	rc = -1;
+            }else{
+				struct timespec now;	
+				if(clock_gettime(CLOCK_MONOTONIC, &now) < 0 ){
+					rc = -1; 
+					break;
+				}         
+				struct timespec deadline = {
+						.tv_sec = now.tv_sec ,
+						.tv_nsec = now.tv_nsec + timeout_ms*1000000l}; 
+				do{
+					if(clock_gettime(CLOCK_MONOTONIC, &now) < 0 ){
+						rc = -1; 
+						break;
+					}  
+					// Calculate how long until deadline
+					int ms_until_deadline = (int)( (deadline.tv_sec - now.tv_sec)*1000l + 
+												   (deadline.tv_nsec - now.tv_nsec)/1000000l);
+					if(ms_until_deadline < 0){
+						rc = 0;
+						break;
+					}    
+					// Wait for connect to complete( or for the timeout deadline )
+					struct pollfd pfds[] = { {.fd = context->sockfd_hsm, .events = POLLOUT} };
+					rc = poll(pfds, 1, ms_until_deadline);
+					// If poll secceeded , make sure it really succeeded
+					if(rc > 0){
+						int error = 0; socklen_t len = sizeof(error);
+						int reval = getsockopt(context->sockfd_hsm, SOL_SOCKET, SO_ERROR, &error, &len);
+						if(reval == 0 ) errno = error;
+						if( error  != 0 ){ 
+							rc = -1;
+							LOGGER(LOG_ERROR,  " Connection Unix Socket Failed", "");
+						}
+					}
+				}
+				
+				// If poll was interrupted , tru again.
+				while( rc ==-1 && errno==EINTR );	
+				// Did poll timeout? If so , fail.
+				if(rc == 0){
+					errno = ETIMEDOUT;
+					LOGGER(LOG_ERROR,  " Connection Unix Socket Timeout", "");
+					rc = -1;
+				}
+            }
+        }
+	}while(0);
+	if( fcntl(context->sockfd_hsm, F_SETFL, sockfd_flags_before) < 0 ) return ABNORMAL;
+	return (rc < 0 ? ABNORMAL : NORMAL );	
+}
+
+/*----------------------------------------------------------------------------  	*/
+/* SUBJECT  : Connect to HSM Via TCP/IP  		                                    */
+/* ARGUMENT :                                                                   	*/
+/*                                                   								*/
+/* RETURN   : SUCCESS: NORMAL                                                   	*/
+/*----------------------------------------------------------------------------		*/
+static long initSocket(hsmManagementContext *context, long timeout_ms)
+{
+	int rc = 0;
+	context->sockfd_hsm = -1;
+	struct sockaddr_in cli_addr;
+    /*--------------------------------------------------------*/
+    /* Initialize the socket address structure                */
+    /*--------------------------------------------------------*/
+    memset(&cli_addr, 0x00, sizeof(cli_addr));
+    cli_addr.sin_family      = AF_INET;
+    cli_addr.sin_port        = htons(INPUT->brd_connt_port_no);
+    cli_addr.sin_addr.s_addr = inet_addr(INPUT->tmn_ip);
+
+    /*--------------------------------------------------------*/
+    /* Create an AF_INET stream socket                        */
+    /*--------------------------------------------------------*/
+    context->sockfd_hsm = socket(AF_INET, SOCK_STREAM, 0);
+    if (context->sockfd_hsm < 0){
+		LOGGER(LOG_ERROR,  "init client Socket to HSM ERROR [%d]", errno);		
+		return ABNORMAL;
+    } 
+	int sockfd_flags_before;
+	if( ( sockfd_flags_before=fcntl(context->sockfd_hsm, F_GETFL,0) ) < 0 ) return ABNORMAL;
+	if( fcntl( context->sockfd_hsm, F_SETFL, sockfd_flags_before | O_NONBLOCK ) < 0 ) return ABNORMAL;
+	
+	// Start connection asyncronously
+	do{
+		if(connect(context->sockfd_hsm,(struct sockaddr *)&cli_addr,sizeof(cli_addr)) < 0)
+        {
+            //Did connection return an error? If so , we'll fail
+            if( (errno != EWOULDBLOCK) && (errno != EINPROGRESS) ){
+            	rc = -1;
+            }else{
+				struct timespec now;	
+				if(clock_gettime(CLOCK_MONOTONIC, &now) < 0 ){
+					rc = -1; 
+					break;
+				}         
+				struct timespec deadline = {
+						.tv_sec = now.tv_sec ,
+						.tv_nsec = now.tv_nsec + timeout_ms*1000000l}; 
+				do{
+					if(clock_gettime(CLOCK_MONOTONIC, &now) < 0 ){
+						rc = -1; 
+						break;
+					}  
+					// Calculate how long until deadline
+					int ms_until_deadline = (int)( (deadline.tv_sec - now.tv_sec)*1000l + 
+												   (deadline.tv_nsec - now.tv_nsec)/1000000l);
+					if(ms_until_deadline < 0){
+						rc = 0;
+						break;
+					}
+					// Wait for connect to complete( or for the timeout deadline )
+					struct pollfd pfds[] = { {.fd = context->sockfd_hsm, .events = POLLOUT} };
+					rc = poll(pfds, 1, ms_until_deadline);
+					// If poll secceeded , make sure it really succeeded
+					if(rc > 0){  
+						int error = 0; 
+						socklen_t len = sizeof(error);
+						int reval = getsockopt(context->sockfd_hsm, SOL_SOCKET, SO_ERROR, &error, &len);
+						if(reval == 0 ) errno = error;
+						if( error  != 0 ){ 
+							rc = -1;
+							LOGGER(LOG_ERROR,  "Connection Failed", "");	
+						}
+					}
+				}
+				// If poll was interrupted , tru again.
+				while( rc ==-1 && errno==EINTR );	
+				// Did poll timeout? If so , fail.
+				if(rc == 0){
+					errno = ETIMEDOUT;
+					LOGGER(LOG_ERROR,  "Connection Timeout", "");	
+					rc = -1;
+				}
+            }
+        }
+	}while(0);
+	if( fcntl(context->sockfd_hsm, F_SETFL, sockfd_flags_before) < 0 ) return ABNORMAL;
+	return (rc < 0 ? ABNORMAL : NORMAL ); 
+}
+static int writeUnixSocket(sockfd, senddata, sendlen)
+int  sockfd;
+char *senddata;
+int  sendlen;
+{
+    register int nleft, nwritten;
+
+    nleft = sendlen;
+    while (nleft > 0)  
+    {
+        nwritten = write(sockfd, senddata, nleft);
+		LOGGER(LOG_DEBUG,  "Write data [%d - %d",nwritten,sendlen);
+        if (nwritten < 0)
+        {
+            if (errno == EINTR) continue;   
+            return (nwritten);
+        }
+        else if (nwritten == 0) break;
+
+        nleft -= nwritten;
+        senddata += nwritten;
+    }
+
+    return (sendlen - nleft);
+}
+
+static int readUnixSocket(sockfd, recvdata, recvlen)
+int  sockfd;
+char *recvdata;
+int  recvlen;
+{ 
+    register int nleft, nreadlen, willreadlen;
+    char tmp[DEFPACKETSIZE];
+
+    nleft = recvlen;
+    willreadlen = recvlen;
+    while (nleft > 0)
+    {
+        if (nleft > sizeof(tmp)) willreadlen = sizeof(tmp);
+        else                     willreadlen = nleft;
+        memset(tmp, 0x00, sizeof(tmp));
+        nreadlen = read(sockfd, tmp, willreadlen);
+        if (nreadlen <  0)
+        {
+            if (errno == EINTR) continue;
+            return (nreadlen);
+        }
+        else if (nreadlen == 0) return (nreadlen);
+
+        nleft -= nreadlen;
+        memcpy(recvdata, tmp, nreadlen);   
+        recvdata += nreadlen;   
+    }
+
+    return (recvlen - nleft);      
+}
+static int writeHsmSocket(hsmManagementContext *context)
+{   
+	char s_buf[1024 + 1] = {0x00, };  
+	if( strncmp( INPUT->rqst_svc_c, HSM_SND_ID_SMTIFD, 6 ) == 0 ){
+		LOGGER(LOG_INFO, "Socket SND_MSG [%s - %d] ",context->hsm_sendBuffer + 2, context->hsm_sndMsgLen);
+		if (writeSocket(context->sockfd_hsm, context->hsm_sendBuffer, context->hsm_sndMsgLen) <= 0 ){
+			LOGGER(LOG_ERROR, "send data to Socket HSM FAIL ", "");
+			return ABNORMAL;
+		}     
+	}else{   
+		LOGGER(LOG_INFO, "IPC SND_MSG [%s - %d] ",context->hsm_sendBuffer + 2, context->hsm_sndMsgLen);
+		if (writeUnixSocket(context->sockfd_hsm, context->hsm_sendBuffer, context->hsm_sndMsgLen) <= 0 ){
+			LOGGER(LOG_ERROR, "send data to IPC HSM FAIL ", "");
+			return ABNORMAL;
+		}
+	}
+  
+}
+
+static int readHsmSocket(hsmManagementContext *context) 
+{
+	int iret = 0;
+	if( strncmp( INPUT->rqst_svc_c, HSM_SND_ID_SMTIFD, 6 ) == 0 ){
+		if ((iret = readSocket(context->sockfd_hsm, context->hsm_recvBuffer, context->hsm_rcvMsgLen)) <= 0 ){
+			LOGGER(LOG_ERROR, "Read data from Socket HSM FAIL", "");
+			return ABNORMAL;
+		}
+	}else{
+		if ( ( iret = readUnixSocket(context->sockfd_hsm, context->hsm_recvBuffer, context->hsm_rcvMsgLen)) <= 0 ){
+			LOGGER(LOG_ERROR, "Read data from IPC HSM FAIL", "");
+			return ABNORMAL;
+		}
+	}
+	return iret;
+}
+/*----------------------------------------------------------------------------  	*/
+/* SUBJECT  : Connect to HSM		                                              	*/
+/* ARGUMENT :                                                                   	*/
+/*  sndId :                                                                     	*/
+/*      smtifd : diretly via TCP                                              		*/
+/*      amtifp : via PipeLine  inter-socket                                     	*/
+/*  sockfd_hsm : hsm socket ID                                                  	*/
+/* RETURN   : SUCCESS: NORMAL                                                   	*/
+/*----------------------------------------------------------------------------		*/
+
+static long connectToHSM(hsmManagementContext *context)
+{  
+	if (context->sockfd_hsm > 0){
+    	close(context->sockfd_hsm);
+    	context->sockfd_hsm = -1;
+    }
+    
+	if( strncmp( INPUT->rqst_svc_c, HSM_SND_ID_SMTIFD, 6 ) == 0 ){
+
+		LOGGER(LOG_INFO,  "HSM SERVER CONNECT TRYING...[%s:%d]",INPUT->tmn_ip, INPUT->brd_connt_port_no);	
+		if(initSocket(context,2000) != NORMAL){
+			LOGGER(LOG_ERROR,  "Connect Net Socket to HSM ERROR....[%s:%d]",INPUT->tmn_ip, INPUT->brd_connt_port_no);	
+			return ABNORMAL;
+		}
+		
+    }else{   
+		if(initClientUnixSocket(context, 2000) != NORMAL){
+			if(initSocket(context,2000) != NORMAL){
+				LOGGER(LOG_ERROR,  "Re-try Connect Net Socket to HSM ERROR....[%s:%d]",INPUT->tmn_ip, INPUT->brd_connt_port_no);	
+				return ABNORMAL;
+			}
+		}else{
+			LOGGER(LOG_INFO,  "Connected IPC to HSM [%s]",INPUT->rqst_svc_c);	
+		}
+	}
+	if (context->sockfd_hsm < 0)
+	{
+		LOGGER(LOG_ERROR,  "Connect to HSM ERROR", "");
+		return ABNORMAL;
+	}
+
+    return NORMAL;  
+}
+/*----------------------------------------------------------------------------*/
+/* Send Message To HSM                                                        */
+/*   																		  */
+/*----------------------------------------------------------------------------*/
+static long sendDataToHSM(hsmManagementContext *context)
+{
+	if(connectToHSM(context) != NORMAL){
+		return ABNORMAL;
+	}
+	if (writeHsmSocket(context) <= 0 ){
+		LOGGER(LOG_ERROR,  "send data to HSM FAIL", "");
+		return ABNORMAL;
+	}
+		
+	LOGGER(LOG_INFO,  "send data to HSM Successfully", "");	
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* Receive Message From HSM                                                   */
+/*   																		  */
+/*----------------------------------------------------------------------------*/
+static long rcvDataFromHSM(hsmManagementContext *context)
+{
+	int iret = 0;
+	uint64_t r_length;
+	fd_set rset;
+	struct timeval tval;
+
+	tval.tv_sec  = 5;
+    tval.tv_usec = 0;   
+
+	int read_flag = 0;  
+	FD_ZERO(&rset);
+
+	if(context->sockfd_hsm != -1)
+		FD_SET(context->sockfd_hsm, &rset);
+
+	int maxfd = context->sockfd_hsm;
+
+	int ret = select(maxfd+1, &rset, 0, 0, &tval);
+	if (ret == -1)
+	{
+		LOGGER(LOG_ERROR,  "get TCP Socket Trx event Error", "");
+		return ABNORMAL;
+	}
+	else if (ret == 0)
+	{
+		LOGGER(LOG_ERROR,  "Reach TCP Socket Trx event Timeout %d seconds", tval.tv_sec);
+		return ABNORMAL;
+	}
+	else
+	{
+		if(FD_ISSET(context->sockfd_hsm, &rset))	read_flag = 1;
+		else read_flag = 0;
+	}
+	
+	if (read_flag > 0)
+	{
+		LOGGER(LOG_DEBUG,  "Start Read", "");
+		context->hsm_rcvMsgLen = 2;
+		if (readHsmSocket(context) <= 0)
+		{
+			LOGGER(LOG_ERROR,  "readSocket 1  [sockfd=%d recvLength=%d ERROR 1", context->sockfd_hsm, iret);
+			return  ABNORMAL;
+		}
+		context->hsm_rcvMsgLen = (long)( (context->hsm_recvBuffer[0] * 256)&0xFF) + (long)(context->hsm_recvBuffer[1]&0xFF);
+		memset(context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer))	;  
+		if (readHsmSocket(context) <= 0)
+		{
+			LOGGER(LOG_ERROR,  "readSocket 1  [sockfd=%d recvLength=%d ERROR 2", context->sockfd_hsm, iret);
+			return  ABNORMAL;
+		}
+	} 
+	if (context->sockfd_hsm > 0){
+		close(context->sockfd_hsm);
+		context->sockfd_hsm = -1;  
+	}
+	LOGGER(LOG_DEBUG,  "hsm_recvBuffer [%s]", context->hsm_recvBuffer);
+	return NORMAL;
+}
+
+static long execCmd(hsmManagementContext *context)   
+{
+	if(sendDataToHSM(context) != NORMAL){
+		return ABNORMAL;
+	}
+	if(rcvDataFromHSM(context) != NORMAL){
+		return ABNORMAL;
+	}
+	return NORMAL;
+}
+
+int importZpkKey(hsmManagementContext *context )
+{
+	memset(&context->r_code, 0x00, sizeof(context->r_code));
+	memset(&context->r_data, 0x00, sizeof(context->r_data));
+	memset(&context->hsm_sendBuffer, 0x00, sizeof(context->hsm_sendBuffer));
+	memset(&context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer));
+	
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	
+	char l_zmk[200 + 1] = {0x00, };
+	sprintf(l_zmk, "%s", INPUT->zmk_ctt);
+	char l_zpk[200 + 1] = {0x00, };
+	sprintf(l_zpk, "%s", INPUT->src_zpk_ctt);  
+	
+	memset(s_cmdA6.msghead, 0x20, sizeof(s_cmdA6.msghead) );
+	memcpy(s_cmdA6.msghead, "1234", 4);
+	memset(s_cmdA6.cmdcode, 0x20, sizeof(s_cmdA6.cmdcode) );
+	memcpy(s_cmdA6.cmdcode, "A6", 2);
+	memset(s_cmdA6.keytype, 0x20, sizeof(s_cmdA6.keytype) );
+	memcpy(s_cmdA6.keytype, "FFF", 3); 
+	memset(s_cmdA6.zmk, 0x20, sizeof(s_cmdA6.zmk) );
+	memcpy(s_cmdA6.zmk, l_zmk, strlen(l_zmk)); 
+	memset(s_cmdA6.dstblockkey, 0x20, sizeof(s_cmdA6.dstblockkey) );
+	memcpy(s_cmdA6.dstblockkey, l_zpk, strlen(l_zpk)); 
+	memset(s_cmdA6.kschem, 0x20, sizeof(s_cmdA6.kschem) );
+	memcpy(s_cmdA6.kschem, "S", 1); 
+	memset(s_cmdA6.deli, 0x20, sizeof(s_cmdA6.deli) );        
+	memset(s_cmdA6.lmkiden, 0x20, sizeof(s_cmdA6.lmkiden) );    
+	
+	if(strlen(INPUT->lmk_id) > 0){    
+		memcpy(s_cmdA6.deli, "%", 1);
+		memcpy(s_cmdA6.lmkiden, INPUT->lmk_id, 2); 
+	}
+	
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdA6, sizeof(s_cmdA6) );   
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	
+	     
+	s_length = strlen(&context->hsm_sendBuffer[2]); 
+	context->hsm_sendBuffer[0] = s_length / 256;
+	context->hsm_sendBuffer[1] = s_length % 256;
+	context->hsm_sndMsgLen = 2 + s_length;
+	  
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	
+	if(checkResp(context, "A7") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [A7 - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+
+	memcpy(OUTPUT->atm_respond_c, context->hsm_recvBuffer + 6, sizeof(OUTPUT->atm_respond_c) -1);
+	if(strncmp(OUTPUT->atm_respond_c, "00", 2 ) == 0){
+		char keylen[5] = {0x00,};
+		long keySrtIdx = 8,keyUnderLmkLen = 0, keyUnderZmkLen = 0;
+		sprintf(keylen, "%.4s", context->hsm_recvBuffer + keySrtIdx + 1 + 1);     
+		keyUnderLmkLen = atoi(keylen);
+		memcpy(OUTPUT->dest_zpk_ctt, context->hsm_recvBuffer + keySrtIdx, keyUnderLmkLen + 1);
+		keySrtIdx+=keyUnderLmkLen + 1;  
+		memcpy(OUTPUT->mac_ctt, context->hsm_recvBuffer + keySrtIdx, 6);
+	}
+	return NORMAL;
+}
+
+int importMakKey(hsmManagementContext *context )
+{
+	// bzero(&context->r_code, sizeof(context->r_code));
+	// bzero(&context->r_data, sizeof(context->r_data));
+	// memset(&context->hsm_sendBuffer, 0x00, sizeof(context->hsm_sendBuffer));
+	// memset(&context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer));
+	
+	// int s_length = 0;
+	// char return_val[1024] = {0x00,};
+	
+	// char l_zmk[200 + 1] = {0x00, };
+	// sprintf(l_zmk, "%s", INPUT->zmk_ctt);
+	// char l_mak[200 + 1] = {0x00, };
+	// sprintf(l_mak, "%s", INPUT->dest_mak_ctt);
+	
+	// memset(s_cmdA6.msghead, 0x20, sizeof(s_cmdA6.msghead) );
+	// memcpy(s_cmdA6.msghead, "1234", 4);
+	// memset(s_cmdA6.cmdcode, 0x20, sizeof(s_cmdA6.cmdcode) );
+	// memcpy(s_cmdA6.cmdcode, "A6", 2);
+	// memset(s_cmdA6.keytype, 0x20, sizeof(s_cmdA6.keytype) );
+	// memcpy(s_cmdA6.keytype, "FFF", 2); 
+	// memset(s_cmdA6.zmk, 0x20, sizeof(s_cmdA6.zmk) );
+	// memcpy(s_cmdA6.zmk, l_zmk, strlen(l_zmk)); 
+	// memset(s_cmdA6.dstblockkey, 0x20, sizeof(s_cmdA6.dstblockkey) );
+	// memcpy(s_cmdA6.dstblockkey, l_mak, strlen(l_mak)); 
+	// memset(s_cmdA6.kschem, 0x20, sizeof(s_cmdA6.kschem) );
+	// memcpy(s_cmdA6.kschem, "R", 1); 
+	// memset(s_cmdA6.deli, 0x20, sizeof(s_cmdA6.deli) );
+	// memset(s_cmdA6.lmkiden, 0x20, sizeof(s_cmdA6.lmkiden) );
+	
+	// if(strlen(INPUT->lmk_id) > 0 ){
+	// 	memcpy(s_cmdNG.lmkdeli, "%", 1);
+	// 	memcpy(s_cmdNG.lmkiden, INPUT->lmk_id, 2); 
+	// }
+	
+	// context->hsm_sndMsgLen = 0;
+	// context->hsm_rcvMsgLen = 0;
+	// memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	// memcpy(return_val, &s_cmdA6, sizeof(s_cmdA6) );
+	// rtrimString(return_val);
+	
+	
+	// s_length = strlen(return_val);
+	// context->hsm_sendBuffer[0] = s_length / 256;
+	// context->hsm_sendBuffer[1] = s_length % 256;
+	// memcpy(&context->hsm_sendBuffer[2], return_val, s_length);
+	// context->hsm_sndMsgLen = 2 + s_length;
+	
+	// if(execCmd(context) != NORMAL){
+	// 	return ABNORMAL;
+	// }
+	
+	// if(checkResp(context, "A7") != NORMAL){
+	// 	logging(logfp, "%s] respcode code is not correct [%.*s] ", __func__, sizeof(r_cmdA7.respcode), "A7");
+	// 	return ABNORMAL;
+	// }
+	// return NORMAL;
+}
+  
+int generateMAC(hsmManagementContext *context)
+{
+	/* int sockfd_hsm = -1;
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	char l_zak[256 + 1] = {0x00, };
+	sprintf(l_zak, "%s", INPUT->mak);
+	int len = strlen(INPUT->msg);
+	char s_len [4 + 1] = {0x00, };
+	memset(s_len, 0x20, sizeof(s_len) -1);
+	sprintf(s_len, "%04X", len);
+
+	memset(s_cmdM6.msghead, 0x20, sizeof(s_cmdM6.msghead) );
+	memcpy(s_cmdM6.msghead, "1234", 4);
+	memset(s_cmdM6.cmdcode, 0x20, sizeof(s_cmdM6.cmdcode) );
+	memcpy(s_cmdM6.cmdcode, "M6", 2);
+	memset(s_cmdM6.modflag, 0x20, sizeof(s_cmdM6.modflag) );
+	memcpy(s_cmdM6.modflag, "0", 1);
+	memset(s_cmdM6.Inputformatflag, 0x20, sizeof(s_cmdM6.Inputformatflag) );
+	memcpy(s_cmdM6.Inputformatflag, "0", 2);
+	memset(s_cmdM6.macsize, 0x20, sizeof(s_cmdM6.macsize) );
+	memcpy(s_cmdM6.macsize, "1", 1);
+	memset(s_cmdM6.macalgorithm, 0x20, sizeof(s_cmdM6.macalgorithm) );
+	memcpy(s_cmdM6.macalgorithm, "6", 3);
+	memset(s_cmdM6.padmethod, 0x20, sizeof(s_cmdM6.padmethod) );
+	memcpy(s_cmdM6.padmethod, "4", 1);
+	memset(s_cmdM6.keytype, 0x20, sizeof(s_cmdM6.keytype) );
+	memcpy(s_cmdM6.keytype, "FFF", 3);
+	memset(s_cmdM6.key, 0x20, sizeof(s_cmdM6.key) );
+	memcpy(s_cmdM6.key, l_zak, strlen(l_zak));
+	memset(s_cmdM6.msglength, 0x20, sizeof(s_cmdM6.msglength) );
+	memcpy(s_cmdM6.msglength, s_len, 4);
+	memset(s_cmdM6.msg, 0x20, sizeof(s_cmdM6.msg) );
+	memcpy(s_cmdM6.msg, INPUT->msg, len);
+	memset(s_cmdM6.lmkdeli, 0x20, sizeof(s_cmdM6.lmkdeli) );
+	memcpy(s_cmdM6.lmkdeli, "%", 1); 
+	memset(s_cmdM6.lmkiden, 0x20, sizeof(s_cmdM6.lmkiden) );
+	memcpy(s_cmdM6.lmkiden, "01", 2); 
+
+	hsm_sndMsgLen = 0;
+	hsm_rcvMsgLen = 0;
+	memset(hsm_sendBuffer, 0x20, sizeof(hsm_sendBuffer) - 1);
+	memset(hsm_sendBuffer, 0x20, sizeof(hsm_sendBuffer) - 1);
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdM6, sizeof(s_cmdM6) );
+	s_length = strlen(return_val);
+	hsm_sendBuffer[0] = s_length / 256;
+	hsm_sendBuffer[1] = s_length % 256;
+	memcpy(&hsm_sendBuffer[2], return_val, s_length);
+	hsm_sndMsgLen = 2 + s_length;
+
+	if(execCmd(INPUT->sndId, sockfd_hsm) != NORMAL ){
+		logging(logfp, "%s] Execute HSM Command Fail [%s", __func__);
+		if(sockfd_hsm > 0 )
+			close(sockfd_hsm);
+		return ABNORMAL;
+	}
+	memcpy(&r_cmdM7, hsm_recvBuffer, sizeof(r_cmdM7) );
+
+	if(memcmp(r_cmdM7.respcode, "M7", sizeof(r_cmdM7.respcode) ) != 0)
+	{
+		logging(logfp, "%s] respcode code is not correct [%s", __func__, sizeof(r_cmdM7.respcode), r_cmdM7.respcode);
+		return ABNORMAL;
+	}
+
+	memcpy(OUTPUT->r_data, r_cmdM7.macdata, sizeof(r_cmdM7.macdata) );
+	memcpy(OUTPUT->r_code, r_cmdM7.errcode, sizeof(r_cmdM7.errcode) ); */
+
+	return NORMAL;
+}
+
+int verifyMAC(hsmManagementContext *context)
+{
+	/* int sockfd_hsm = -1;
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	char l_zak[256 + 1] = {0x00, };
+	sprintf(l_zak, "%s", INPUT->mak);
+	int len = strlen(INPUT->msg);
+	char s_len [4 + 1] = {0x00, };
+	memset(s_len, 0x20, sizeof(s_len) -1);
+	sprintf(s_len, "%04X", len);
+
+	memset(s_cmdM8.msghead, 0x20, sizeof(s_cmdM8.msghead) );
+	memcpy(s_cmdM8.msghead, "1234", 4);
+	memset(s_cmdM8.cmdcode, 0x20, sizeof(s_cmdM8.cmdcode) );
+	memcpy(s_cmdM8.cmdcode, "M6", 2);
+	memset(s_cmdM8.modflag, 0x20, sizeof(s_cmdM8.modflag) );
+	memcpy(s_cmdM8.modflag, "0", 1);
+	memset(s_cmdM8.Inputformatflag, 0x20, sizeof(s_cmdM8.Inputformatflag) );
+	memcpy(s_cmdM8.Inputformatflag, "0", 2);
+	memset(s_cmdM8.macsize, 0x20, sizeof(s_cmdM8.macsize) );
+	memcpy(s_cmdM8.macsize, "1", 1);
+	memset(s_cmdM8.macalgorithm, 0x20, sizeof(s_cmdM8.macalgorithm) );
+	memcpy(s_cmdM8.macalgorithm, "6", 3);
+	memset(s_cmdM8.padmethod, 0x20, sizeof(s_cmdM8.padmethod) );
+	memcpy(s_cmdM8.padmethod, "4", 1);
+	memset(s_cmdM8.keytype, 0x20, sizeof(s_cmdM8.keytype) );
+	memcpy(s_cmdM8.keytype, "FFF", 3);
+	memset(s_cmdM8.key, 0x20, sizeof(s_cmdM8.key) );
+	memcpy(s_cmdM8.key, l_zak, strlen(l_zak));
+	memset(s_cmdM8.msglength, 0x20, sizeof(s_cmdM8.msglength) );
+	memcpy(s_cmdM8.msglength, s_len, 4);
+	memset(s_cmdM8.msg, 0x20, sizeof(s_cmdM8.msg) );
+	memcpy(s_cmdM8.msg, INPUT->msg, len);
+	memset(s_cmdM8.mac, 0x20, sizeof(s_cmdM8.mac) );
+	memcpy(s_cmdM8.mac, INPUT->mac, 16); 
+	memset(s_cmdM8.lmkdeli, 0x20, sizeof(s_cmdM8.lmkdeli) );
+	memcpy(s_cmdM8.lmkdeli, "%", 1); 
+	memset(s_cmdM8.lmkiden, 0x20, sizeof(s_cmdM8.lmkiden) );
+	memcpy(s_cmdM8.lmkiden, "01", 2); 
+
+	hsm_sndMsgLen = 0;
+	hsm_rcvMsgLen = 0;
+	memset(hsm_sendBuffer, 0x20, sizeof(hsm_sendBuffer) - 1);
+	memset(hsm_sendBuffer, 0x20, sizeof(hsm_sendBuffer) - 1);
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdM8, sizeof(s_cmdM8) );
+	s_length = strlen(return_val);
+	hsm_sendBuffer[0] = s_length / 256;
+	hsm_sendBuffer[1] = s_length % 256;
+	memcpy(&hsm_sendBuffer[2], return_val, s_length);
+	hsm_sndMsgLen = 2 + s_length;
+
+	if(execCmd(INPUT->sndId, sockfd_hsm) != NORMAL ){
+		logging(logfp, "%s] Execute HSM Command Fail [%s", __func__);
+		if(sockfd_hsm > 0 )
+			close(sockfd_hsm);
+		return ABNORMAL;
+	}
+	memcpy(&r_cmdM9, hsm_recvBuffer, sizeof(r_cmdM9) );
+
+	if(memcmp(r_cmdM9.respcode, "M9", sizeof(r_cmdM9.respcode) ) != 0)
+	{
+		logging(logfp, "%s] respcode code is not correct [%s", __func__, sizeof(r_cmdM9.respcode), r_cmdM9.respcode);
+		return ABNORMAL;
+	}
+
+	memcpy(OUTPUT->r_code, r_cmdM9.errcode, sizeof(r_cmdM9.errcode) ); */
+
+	return NORMAL;
+}
+
+int translatePinZpkToZpk(hsmManagementContext *context)
+{
+	/* int sockfd_hsm = -1;
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	char l_szpk[256 + 1] = {0x00, };
+	char l_dzpk[256 + 1] = {0x00, };
+	char l_pan[19 +1]={0x00,};
+
+	sprintf(l_pan, "%.*s", strlen(INPUT->pan) -1 , INPUT->pan);
+	sprintf(l_szpk, "%s", INPUT->sourcZpk);
+	sprintf(l_dzpk, "%s", INPUT->desZpk);
+
+	// memset(s_cmdM6, 0x00, sizeof(s_cmdM6) );
+	memset(s_cmdCC.msghead, 0x20, sizeof(s_cmdCC.msghead) );
+	memcpy(s_cmdCC.msghead, "1234", 4);
+	memset(s_cmdCC.cmdcode, 0x20, sizeof(s_cmdCC.cmdcode) );
+	memcpy(s_cmdCC.cmdcode, "CC", 2);
+	memset(s_cmdCC.srczpk, 0x20, sizeof(s_cmdCC.srczpk) );
+	memcpy(s_cmdCC.srczpk, l_szpk, strlen(l_szpk));
+	memset(s_cmdCC.dstzpk, 0x20, sizeof(s_cmdCC.dstzpk) );
+	memcpy(s_cmdCC.dstzpk, l_dzpk, strlen(l_dzpk));
+	memset(s_cmdCC.maxpinlen, 0x20, sizeof(s_cmdCC.maxpinlen) );
+	memcpy(s_cmdCC.maxpinlen, "12", 2);
+	memset(s_cmdCC.srcpinblock, 0x20, sizeof(s_cmdCC.srcpinblock) );
+	memcpy(s_cmdCC.srcpinblock, INPUT->pinBlock, 32);
+	memset(s_cmdCC.srcpinfmtcode, 0x20, sizeof(s_cmdCC.srcpinfmtcode) );
+	memcpy(s_cmdCC.srcpinfmtcode, "48", 2);
+	memset(s_cmdCC.dstpinfmtcode, 0x20, sizeof(s_cmdCC.dstpinfmtcode) );
+	memcpy(s_cmdCC.dstpinfmtcode, "48", 2);
+	memset(s_cmdCC.pan, 0x20, sizeof(s_cmdCC.pan) );
+	memcpy(s_cmdCC.pan, l_pan, strlen(l_pan));
+	memset(s_cmdCC.aesdeli, 0x20, sizeof(s_cmdCC.aesdeli) );
+	memcpy(s_cmdCC.aesdeli, ";", 1);
+	memset(s_cmdCC.lmkdeli, 0x20, sizeof(s_cmdCC.lmkdeli) );
+	memcpy(s_cmdCC.lmkdeli, "%", 1);
+	memset(s_cmdCC.lmkiden, 0x20, sizeof(s_cmdCC.lmkiden) );
+	memcpy(s_cmdCC.lmkiden, "01", 2); 
+
+	hsm_sndMsgLen = 0;
+	hsm_rcvMsgLen = 0;
+	memset(hsm_sendBuffer, 0x20, sizeof(hsm_sendBuffer) - 1);
+	memset(hsm_sendBuffer, 0x20, sizeof(hsm_sendBuffer) - 1);
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdCC, sizeof(s_cmdCC) );
+	s_length = strlen(return_val);
+	hsm_sendBuffer[0] = s_length / 256;
+	hsm_sendBuffer[1] = s_length % 256;
+	memcpy(&hsm_sendBuffer[2], return_val, s_length);
+	hsm_sndMsgLen = 2 + s_length;
+
+	if(execCmd(INPUT->sndId, sockfd_hsm) != NORMAL ){
+		logging(logfp, "%s] Execute HSM Command Fail [%s", __func__);
+		if(sockfd_hsm > 0 )
+			close(sockfd_hsm);
+		return ABNORMAL;
+	}   
+	memcpy(&r_cmdCD, hsm_recvBuffer, sizeof(r_cmdCD) );
+
+	if(memcmp(r_cmdCD.respcode, "CD", sizeof(r_cmdCD.respcode) ) != 0)
+	{
+		logging(logfp, "%s] respcode code is not correct [%s", __func__, sizeof(r_cmdCD.respcode), r_cmdCD.respcode);
+		return ABNORMAL;
+	}
+
+	memcpy(OUTPUT->r_data, r_cmdCD.dstpinblock, sizeof(r_cmdCD.dstpinblock) );
+	memcpy(OUTPUT->r_code, r_cmdCD.errcode, sizeof(r_cmdCD.errcode) ); */
+
+	return NORMAL;
+}
+     
+int encPinUnderLmk(hsmManagementContext *context )
+{
+	bzero(&context->r_code, sizeof(context->r_code));
+	bzero(&context->r_data, sizeof(context->r_data));
+	bzero(&context->hsm_sendBuffer, sizeof(context->hsm_sendBuffer));
+	bzero(&context->hsm_recvBuffer, sizeof(context->hsm_recvBuffer));
+	
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	
+	char pinblock[13 + 1] = {0x00,};  
+	memset(pinblock, 'F', sizeof(pinblock) -1 );
+	int pin_len = strlen(INPUT->atm_psn_pin_nw) > 13 ? 13 : strlen(INPUT->atm_psn_pin_nw);
+	memcpy(pinblock, INPUT->atm_psn_pin_nw, pin_len);
+	
+	char l_pan[12 + 1] = {0x00, };
+	snprintf(l_pan,sizeof(l_pan), "%.12s", INPUT->atm_pan_ctt + (strlen(INPUT->atm_pan_ctt) -12 ) );  // 12 right-most digits 
+	
+	memset(s_cmdBA.msghead, 0x20, sizeof(s_cmdBA.msghead) );
+	memcpy(s_cmdBA.msghead, "1234", 4);
+	memset(s_cmdBA.cmdcode, 0x20, sizeof(s_cmdBA.cmdcode) );
+	memcpy(s_cmdBA.cmdcode, "BA", 2);
+	memset(s_cmdBA.pin, 0x20, sizeof(s_cmdBA.pin) );
+	memcpy(s_cmdBA.pin, pinblock, 13);
+	memset(s_cmdBA.pan, 0x20, sizeof(s_cmdBA.pan) );
+	memcpy(s_cmdBA.pan, l_pan, 12);
+	memset(s_cmdBA.lmkdeli, 0x20, sizeof(s_cmdBA.lmkdeli) );
+	memset(s_cmdBA.lmkiden, 0x20, sizeof(s_cmdBA.lmkiden) );
+	
+	if(strlen(INPUT->lmk_id) > 0 ){
+		memcpy(s_cmdBA.lmkdeli, "%", 1);
+		memcpy(s_cmdBA.lmkiden, INPUT->lmk_id, 2); 
+	}
+	
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdBA, sizeof(s_cmdBA) );
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	
+	
+	s_length = strlen(&context->hsm_sendBuffer[2]);  
+	context->hsm_sendBuffer[0] = s_length / 256;
+	context->hsm_sendBuffer[1] = s_length % 256;
+	
+	context->hsm_sndMsgLen = 2 + s_length;
+	
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	
+	if(checkResp(context, "BB") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [BB - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+	
+	return NORMAL;
+}       
+
+int translatePinLmkToZpk(hsmManagementContext *context)
+{   
+	bzero(&context->r_code, sizeof(context->r_code));
+	bzero(&context->r_data, sizeof(context->r_data));
+	bzero(&context->hsm_sendBuffer, sizeof(context->hsm_sendBuffer));
+	bzero(&context->hsm_recvBuffer, sizeof(context->hsm_recvBuffer));
+	
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	    
+	char l_dzpk[200 + 1] = {0x00, };
+	snprintf(l_dzpk, sizeof(l_dzpk), "%s", INPUT->dest_zpk_ctt);
+	memset(s_cmdJG.msghead, 0x20, sizeof(s_cmdJG.msghead) );
+	memcpy(s_cmdJG.msghead, "1234", 4);
+	memset(s_cmdJG.cmdcode, 0x20, sizeof(s_cmdJG.cmdcode) );
+	memcpy(s_cmdJG.cmdcode, "JG", 2);
+	memset(s_cmdJG.deszpk, 0x20, sizeof(s_cmdJG.deszpk) );
+	memcpy(s_cmdJG.deszpk, l_dzpk, strlen(l_dzpk));
+	memset(s_cmdJG.pinform, 0x20, sizeof(s_cmdJG.pinform) );
+	memcpy(s_cmdJG.pinform, "48", 2);
+	memset(s_cmdJG.pan, 0x20, sizeof(s_cmdJG.pan) );
+	memcpy(s_cmdJG.pan, INPUT->atm_pan_ctt , strlen(INPUT->atm_pan_ctt));
+	memset(s_cmdJG.pindeli, 0x20, sizeof(s_cmdJG.pindeli) );
+	memcpy(s_cmdJG.pindeli, ";", 1);
+	memset(s_cmdJG.encpin, 0x20, sizeof(s_cmdJG.encpin) );
+	memcpy(s_cmdJG.encpin, INPUT->atm_psn_pin_nw, 33);
+	memset(s_cmdJG.lmkdeli, 0x20, sizeof(s_cmdJG.lmkdeli) );
+	memset(s_cmdJG.lmkiden, 0x20, sizeof(s_cmdJG.lmkiden) );
+	
+	if(strlen(INPUT->lmk_id) > 0 ){
+		memcpy(s_cmdJG.lmkdeli, "%", 1);
+		memcpy(s_cmdJG.lmkiden, INPUT->lmk_id, 2); 
+	}
+	
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;
+
+	memcpy(return_val, &s_cmdJG, sizeof(s_cmdJG) );
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	
+	s_length = strlen(&context->hsm_sendBuffer[2]);  
+	context->hsm_sendBuffer[0] = s_length / 256;
+	context->hsm_sendBuffer[1] = s_length % 256;
+	context->hsm_sndMsgLen = 2 + s_length;
+	
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	
+	if(checkResp(context, "JH") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [JH - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+	return NORMAL;
+}
+
+int translatePinZpkToLmk(hsmManagementContext *context)   
+{
+	memset(context->r_code, 0x00, sizeof(context->r_code));
+	memset(context->r_data, 0x00, sizeof(context->r_data));
+	memset(context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer));
+	memset(context->hsm_sendBuffer, 0x00, sizeof(context->hsm_sendBuffer));
+	char l_pan[12 + 1] = {0x00, };
+	snprintf(l_pan, sizeof(l_pan), "%.12s", INPUT->atm_pan_ctt + (strlen(INPUT->atm_pan_ctt) -12 -1 ) );  // 12 right-most digits , exclude check digit
+ 
+	int s_length = 0;
+	char return_val[1024] = {0x00,};    
+	char l_dzpk[200 + 1] = {0x00, };
+	snprintf(l_dzpk, sizeof(l_dzpk), "%s", INPUT->dest_zpk_ctt);  
+
+	// memset(s_cmdM6, 0x00, sizeof(s_cmdM6) );
+	memset(s_cmdJE.msghead, 0x20, sizeof(s_cmdJE.msghead) );
+	memcpy(s_cmdJE.msghead, "1234", 4);
+	memset(s_cmdJE.cmdcode, 0x20, sizeof(s_cmdJE.cmdcode) );   
+	memcpy(s_cmdJE.cmdcode, "JE", 2);   
+	memset(s_cmdJE.deszpk, 0x20, sizeof(s_cmdJE.deszpk) );
+	memcpy(s_cmdJE.deszpk, l_dzpk, strlen(l_dzpk));
+	memset(s_cmdJE.pinblock, 0x20, sizeof(s_cmdJE.pinblock) );    
+	memcpy(s_cmdJE.pinblock, INPUT->atm_psn_pin_nw, 32);
+	memset(s_cmdJE.pinform, 0x20, sizeof(s_cmdJE.pinform) );  
+	memcpy(s_cmdJE.pinform, "48", 2);
+	memset(s_cmdJE.pan, 0x20, sizeof(s_cmdJE.pan) );
+	// memcpy(s_cmdJE.pan, INPUT->atm_pan_ctt, strlen(INPUT->atm_pan_ctt) -1 );
+	memcpy(s_cmdJE.pan, l_pan, 12 );
+	memset(s_cmdJE.pindeli, 0x20, sizeof(s_cmdJE.pindeli) );
+	memcpy(s_cmdJE.pindeli, ";", 1);
+	memset(s_cmdJE.lmkdeli, 0x20, sizeof(s_cmdJE.lmkdeli) );
+	memset(s_cmdJE.lmkiden, 0x20, sizeof(s_cmdJE.lmkiden) );
+	
+	if(strlen(INPUT->lmk_id) > 0 ){
+		memcpy(s_cmdJE.lmkdeli, "%", 1);  
+		memcpy(s_cmdJE.lmkiden, INPUT->lmk_id, 2); 
+	}
+   
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;
+	memset(return_val, 0x20, sizeof(return_val) - 1);  
+
+	memcpy(return_val, &s_cmdJE, sizeof(s_cmdJE) );
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	
+	s_length = strlen(&context->hsm_sendBuffer[2]);     
+	context->hsm_sendBuffer[0] = s_length / 256;    
+	context->hsm_sendBuffer[1] = s_length % 256;
+	context->hsm_sndMsgLen = 2 + s_length;
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	if(checkResp(context, "JF") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [JF - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+	return NORMAL;
+}
+
+int translatePinZpkToLmkNAP(hsmManagementContext *context)   
+{
+	memset(context->r_code, 0x00, sizeof(context->r_code));
+	memset(context->r_data, 0x00, sizeof(context->r_data));
+	memset(context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer));
+	memset(context->hsm_sendBuffer, 0x00, sizeof(context->hsm_sendBuffer));
+	// char l_pan[12 + 1] = {0x00, };
+	// snprintf(l_pan, sizeof(l_pan), "%.12s", INPUT->atm_pan_ctt + (strlen(INPUT->atm_pan_ctt) -12 -1 ) );  // 12 right-most digits , exclude check digit
+ 
+	int s_length = 0;
+	char return_val[1024] = {0x00,};    
+	char l_dzpk[256 + 1] = {0x00, };
+	snprintf(l_dzpk, sizeof(l_dzpk), "%s", INPUT->dest_zpk_ctt);  
+
+	// memset(s_cmdM6, 0x00, sizeof(s_cmdM6) );
+	memset(s_cmdJE.msghead, 0x20, sizeof(s_cmdJE.msghead) );
+	memcpy(s_cmdJE.msghead, "1234", 4);
+	memset(s_cmdJE.cmdcode, 0x20, sizeof(s_cmdJE.cmdcode) );   
+	memcpy(s_cmdJE.cmdcode, "JE", 2);   
+	memset(s_cmdJE.deszpk, 0x20, sizeof(s_cmdJE.deszpk) );
+	memcpy(s_cmdJE.deszpk, l_dzpk, strlen(l_dzpk));
+	memset(s_cmdJE.pinblock, 0x20, sizeof(s_cmdJE.pinblock) );    
+	memcpy(s_cmdJE.pinblock, INPUT->atm_psn_pin_nw, 32);
+	memset(s_cmdJE.pinform, 0x20, sizeof(s_cmdJE.pinform) );  
+	memcpy(s_cmdJE.pinform, "48", 2);
+	memset(s_cmdJE.pan, 0x20, sizeof(s_cmdJE.pan) );
+	// memcpy(s_cmdJE.pan, INPUT->atm_pan_ctt, strlen(INPUT->atm_pan_ctt) -1 );
+	memcpy(s_cmdJE.pan, INPUT->atm_pan_ctt, strlen(INPUT->atm_pan_ctt) );
+	memset(s_cmdJE.pindeli, 0x20, sizeof(s_cmdJE.pindeli) );
+	memcpy(s_cmdJE.pindeli, ";", 1);
+	memset(s_cmdJE.lmkdeli, 0x20, sizeof(s_cmdJE.lmkdeli) );
+	memset(s_cmdJE.lmkiden, 0x20, sizeof(s_cmdJE.lmkiden) );
+	
+	if(strlen(INPUT->lmk_id) > 0 ){
+		memcpy(s_cmdJE.lmkdeli, "%", 1);  
+		memcpy(s_cmdJE.lmkiden, INPUT->lmk_id, 2); 
+	}
+   
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;  
+	memset(return_val, 0x20, sizeof(return_val) - 1);  
+
+	memcpy(return_val, &s_cmdJE, sizeof(s_cmdJE) );
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	
+	s_length = strlen(&context->hsm_sendBuffer[2]);     
+	context->hsm_sendBuffer[0] = s_length / 256;    
+	context->hsm_sendBuffer[1] = s_length % 256;
+	context->hsm_sndMsgLen = 2 + s_length;
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	if(checkResp(context, "JF") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [JF - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+	return NORMAL;
+}
+
+int decryptPINByLmk(hsmManagementContext *context)    
+{
+	memset(context->r_code, 0x00, sizeof(context->r_code));
+	memset(context->r_data, 0x00, sizeof(context->r_data));
+	memset(context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer));
+	memset(context->hsm_sendBuffer, 0x00, sizeof(context->hsm_sendBuffer));
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	char l_pan[12 + 1] = {0x00, };;
+	snprintf(l_pan,sizeof(l_pan), "%.12s", INPUT->atm_pan_ctt + (strlen(INPUT->atm_pan_ctt) -12 -1 ) );  // 12 right-most digits , exclude check digit
+
+	// memset(s_cmdM6, 0x00, sizeof(s_cmdM6) );
+	memset(s_cmdNG.msghead, 0x20, sizeof(s_cmdNG.msghead) );
+	memcpy(s_cmdNG.msghead, "1234", 4);
+	memset(s_cmdNG.cmdcode, 0x20, sizeof(s_cmdNG.cmdcode) );
+	memcpy(s_cmdNG.cmdcode, "NG", 2);
+	memset(s_cmdNG.encpin, 0x20, sizeof(s_cmdNG.encpin) );
+	memcpy(s_cmdNG.encpin, INPUT->atm_psn_pin_nw, 33);
+	memset(s_cmdNG.pan, 0x20, sizeof(s_cmdNG.pan) );
+	memcpy(s_cmdNG.pan, l_pan, 12);
+	memset(s_cmdNG.lmkdeli, 0x20, sizeof(s_cmdNG.lmkdeli) );
+	memset(s_cmdNG.lmkiden, 0x20, sizeof(s_cmdNG.lmkiden) );  
+	
+	if(strlen(INPUT->lmk_id) > 0){
+		memcpy(s_cmdNG.lmkdeli, "%", 1);
+		memcpy(s_cmdNG.lmkiden, INPUT->lmk_id, 2); 
+	}
+
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdNG, sizeof(s_cmdNG) );
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	// rtrimString(return_val);
+	s_length = strlen(&context->hsm_sendBuffer[2]);     
+	context->hsm_sendBuffer[0] = s_length / 256;
+	context->hsm_sendBuffer[1] = s_length % 256;
+	// memcpy(&context->hsm_sendBuffer[2], return_val, s_length);
+	context->hsm_sndMsgLen = 2 + s_length;
+
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	
+	if(checkResp(context, "NH") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [NH - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+
+	return NORMAL;
+}
+
+int decryptPINByLmkNAP(hsmManagementContext *context)
+{
+	memset(context->r_code, 0x00, sizeof(context->r_code));
+	memset(context->r_data, 0x00, sizeof(context->r_data));
+	memset(context->hsm_recvBuffer, 0x00, sizeof(context->hsm_recvBuffer));
+	memset(context->hsm_sendBuffer, 0x00, sizeof(context->hsm_sendBuffer));
+	int s_length = 0;
+	char return_val[1024] = {0x00,};
+	char l_pan[12 + 1] = {0x00, };;
+	snprintf(l_pan, sizeof(l_pan), "%.12s", INPUT->atm_pan_ctt + (strlen(INPUT->atm_pan_ctt) -12  ) );  // 12 right-most digits
+
+	// memset(s_cmdM6, 0x00, sizeof(s_cmdM6) );
+	memset(s_cmdNG.msghead, 0x20, sizeof(s_cmdNG.msghead) );
+	memcpy(s_cmdNG.msghead, "1234", 4);
+	memset(s_cmdNG.cmdcode, 0x20, sizeof(s_cmdNG.cmdcode) );
+	memcpy(s_cmdNG.cmdcode, "NG", 2);
+	memset(s_cmdNG.encpin, 0x20, sizeof(s_cmdNG.encpin) );
+	memcpy(s_cmdNG.encpin, INPUT->atm_psn_pin_nw, 33);
+	memset(s_cmdNG.pan, 0x20, sizeof(s_cmdNG.pan) );
+	memcpy(s_cmdNG.pan, l_pan, 12);
+	memset(s_cmdNG.lmkdeli, 0x20, sizeof(s_cmdNG.lmkdeli) );
+	memset(s_cmdNG.lmkiden, 0x20, sizeof(s_cmdNG.lmkiden) );  
+	
+	if(strlen(INPUT->lmk_id) > 0){
+		memcpy(s_cmdNG.lmkdeli, "%", 1);
+		memcpy(s_cmdNG.lmkiden, INPUT->lmk_id, 2); 
+	}
+
+	context->hsm_sndMsgLen = 0;
+	context->hsm_rcvMsgLen = 0;
+	memset(return_val, 0x20, sizeof(return_val) - 1);
+
+	memcpy(return_val, &s_cmdNG, sizeof(s_cmdNG) );
+	removeSpace(return_val, &context->hsm_sendBuffer[2]);
+	// rtrimString(return_val);
+	s_length = strlen(&context->hsm_sendBuffer[2]);  
+	context->hsm_sendBuffer[0] = s_length / 256;
+	context->hsm_sendBuffer[1] = s_length % 256;
+	// memcpy(&context->hsm_sendBuffer[2], return_val, s_length);
+	context->hsm_sndMsgLen = 2 + s_length;
+
+	if(execCmd(context) != NORMAL){
+		return ABNORMAL;
+	}
+	
+	if(checkResp(context, "NH") != NORMAL){
+		LOGGER(LOG_ERROR,   "respcode code is not correct [NH - %.*s] ", 2, context->hsm_recvBuffer + 4);
+		return ABNORMAL;
+	}
+
+	return NORMAL;
+}
+
+int smartDecrypt(hsmManagementContext *context)   
+{
+
+	if(strlen(INPUT->atm_pan_ctt) < 1){
+		LOGGER(LOG_ERROR, "PAN is mandatory", "");
+		return ABNORMAL;
+	}
+	if(strlen(INPUT->dest_zpk_ctt) < 1){   
+		LOGGER(LOG_ERROR, "Zpk is mandatory", "");
+		return ABNORMAL;
+	}
+	if(strlen(INPUT->atm_psn_pin_nw) < 1){    
+		LOGGER(LOG_ERROR, "Block Pin is mandatory", "");
+		return ABNORMAL;
+	}
+
+	char r_code[3] = {0x00,};
+	char encPin[33 +1] = {0x00,};
+	  
+	if(translatePinZpkToLmk(context) != NORMAL){
+		return ABNORMAL;
+	}       
+	
+	memcpy(&r_cmdJF, context->hsm_recvBuffer, sizeof(r_cmdJF) );
+	
+	if(memcmp(r_cmdJF.errcode, "00", 2 ) != 0){
+		LOGGER(LOG_ERROR,  "translatePinZpkToLmk error [%.*s]", sizeof(r_cmdJF.errcode), r_cmdJF.errcode);
+		return ABNORMAL;
+	}
+	memcpy(INPUT->atm_psn_pin_nw, r_cmdJF.encpin, 33);
+	if(decryptPINByLmk(context) != NORMAL){
+		return ABNORMAL;      
+	}
+
+	memcpy(&r_cmdNH, context->hsm_recvBuffer, sizeof(r_cmdNH) );
+	char pin_buff[LEN_HSM_PIN_BUFF + 1] = {0x00,};
+	memcpy(pin_buff, r_cmdNH.pin , sizeof(r_cmdNH.pin));
+
+	//remove padding
+	int ix = 0;
+	for(ix = 0; ix < strlen(pin_buff);ix++){   
+		if(pin_buff[ix] < '0' || pin_buff[ix] > '9'  ){
+			pin_buff[ix] = '';   
+			break;
+		}
+	}    
+
+	memcpy(OUTPUT->atm_psn_pin_nw, pin_buff , strlen(pin_buff));
+	memcpy(OUTPUT->atm_respond_c, r_cmdNH.errcode, sizeof(OUTPUT->atm_respond_c) -1);
+        
+	return NORMAL;
+}
+
+int smartEncrypt(hsmManagementContext *context)
+{
+	if(strlen(INPUT->atm_pan_ctt) < 1){
+		LOGGER(LOG_ERROR, "PAN is mandatory", "");
+		return ABNORMAL;
+	}
+	if(strlen(INPUT->dest_zpk_ctt) < 1){
+		LOGGER(LOG_ERROR, "Zpk is mandatory", "");
+		return ABNORMAL;
+	}
+	if(strlen(INPUT->atm_psn_pin_nw) < 1){
+		LOGGER(LOG_ERROR, "Block Pin is mandatory", "");
+		return ABNORMAL;
+	}
+
+	char r_code[3] = {0x00,};
+	char encPin[33 +1] = {0x00,};
+	
+	if(encPinUnderLmk(context) != NORMAL){
+		return ABNORMAL;   
+	}
+	memcpy(&r_cmdBB, context->hsm_recvBuffer, sizeof(r_cmdBB) );
+	
+	if(memcmp(r_cmdBB.errcode, "00", 2 ) != 0){
+		LOGGER(LOG_ERROR,  "Encrypt Pin Under LMK error [%.*s]", sizeof(r_cmdBB.errcode), r_cmdBB.errcode);
+		return ABNORMAL;
+	}
+	
+	memcpy(INPUT->atm_psn_pin_nw, r_cmdBB.encpin, 33);
+	if(translatePinLmkToZpk(context) != NORMAL){
+		return ABNORMAL;
+	}
+	memcpy(&r_cmdJH, context->hsm_recvBuffer, sizeof(r_cmdJH) );
+	memcpy(OUTPUT->atm_respond_c, r_cmdJH.errcode, sizeof(OUTPUT->atm_respond_c) -1);
+	memcpy(OUTPUT->atm_psn_pin_nw, r_cmdJH.pinblock, sizeof(OUTPUT->atm_psn_pin_nw) -1);
+
+	return NORMAL;
+}
+
+int smartDecryptNAP(hsmManagementContext *context)   
+{
+
+	if(strlen(INPUT->atm_pan_ctt) < 1){
+		LOGGER(LOG_ERROR, "PAN is mandatory", "");
+		return ABNORMAL;
+	}
+	if(strlen(INPUT->dest_zpk_ctt) < 1){
+		LOGGER(LOG_ERROR, "Zpk is mandatory", "");
+		return ABNORMAL;              
+	}
+	if(strlen(INPUT->atm_psn_pin_nw) < 1){
+		LOGGER(LOG_ERROR, "Block Pin is mandatory", "");      
+		return ABNORMAL;
+	}
+
+	char r_code[3] = {0x00,};
+	char encPin[33 +1] = {0x00,};
+	        
+	if(translatePinZpkToLmkNAP(context) != NORMAL){
+		return ABNORMAL;   
+	}       
+	
+	memcpy(&r_cmdJF, context->hsm_recvBuffer, sizeof(r_cmdJF) );
+	
+	if(memcmp(r_cmdJF.errcode, "00", 2 ) != 0){
+		LOGGER(LOG_ERROR,  "translatePinZpkToLmk error [%.*s]", sizeof(r_cmdJF.errcode), r_cmdJF.errcode);
+		return ABNORMAL;
+	}
+	memcpy(INPUT->atm_psn_pin_nw, r_cmdJF.encpin, 33);
+	if(decryptPINByLmkNAP(context) != NORMAL){
+		return ABNORMAL;      
+	}
+
+	memcpy(&r_cmdNH, context->hsm_recvBuffer, sizeof(r_cmdNH) );
+
+	char pin_buff[LEN_HSM_PIN_BUFF + 1] = {0x00,};
+	memcpy(pin_buff, r_cmdNH.pin , sizeof(r_cmdNH.pin ));
+
+	//remove padding
+	int ix = 0;
+	for(ix = 0; ix < strlen(pin_buff);ix++){   
+		if(pin_buff[ix] < '0' || pin_buff[ix] > '9'  ){
+			pin_buff[ix] = '';   
+			break;  
+		}
+	}    
+	memcpy(OUTPUT->atm_psn_pin_nw, pin_buff , strlen(pin_buff));
+	memcpy(OUTPUT->atm_respond_c, r_cmdNH.errcode, sizeof(OUTPUT->atm_respond_c) -1);
+        
+	return NORMAL;
+}
+
+void removeSpace(char* sourceStr, char* destStr)
+{
+
+	while(*sourceStr != ''){
+
+		if(*sourceStr != 0x20){
+			*destStr = *sourceStr;
+			destStr++;
+		}
+		sourceStr++;
+	}
+	*destStr = '';
+}
+
+
+/* void logMessage(int logLvl, char *caller, int line, char *format, ...)
+{
+	if(custLoglevel > logLvl) return NORMAL;
+
+	char csMsg[5000];
+	char lgLvl[4] = {0x00,};
+
+	switch(logLvl){
+		case LOG_DEBUG :
+			memcpy(lgLvl, "DBG", sizeof(lgLvl) -1); 
+		break;
+		case LOG_INFO :
+			memcpy(lgLvl, "INF", sizeof(lgLvl) -1);
+		break;
+		case LOG_WARNING :
+			memcpy(lgLvl, "WRN", sizeof(lgLvl) -1);
+		break;
+		case LOG_ERROR :  
+			memcpy(lgLvl, "ERR", sizeof(lgLvl) -1);  
+		break;
+		default :
+			memcpy(lgLvl, "ERR", sizeof(lgLvl) -1);
+		break;   
+	}
+
+	va_list argument;
+    memset( csMsg, 0x00, sizeof( csMsg ) );
+   
+    va_start( argument, format );
+
+    vsprintf( csMsg, format, argument );
+
+	logging(logfp, "%s:%d][%s] %s", caller, line,lgLvl, csMsg);  
+
+} */

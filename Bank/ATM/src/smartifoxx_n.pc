@@ -1,0 +1,1665 @@
+/*----------------------------------------------------------------------------/*
+/* PROGRAM NM : smartifoxx.c                                                  */
+/* PROCESS NM : smartifoxx                                                    */
+/* SUBJECT    : DP Interface Process (DP -> SCB)                              */
+/* Programmer : ChangKoo Lee                                                  */
+/* Target User: Shinhan Vietnam BANK                                          */    
+/* Description: Copyright (C) 2008 NAUTILUS HYOSUNG. Ltd                      */    
+/*              All rights Reserved                                           */     
+/*----------------------------------------------------------------------------*/      
+/* VERSION    DATE         NAME      COMMENT                                  */   
+/*----------------------------------------------------------------------------*/
+/* V1.00      2008.07.13   CKLEE     FIRST CODING                             */
+/*----------------------------------------------------------------------------*/
+#define MAINSRC
+#include "limits.h"
+#include "defcom.h"
+#include "dpifcom.h"
+#include "trdef.h"
+#include "isotrdef.h"
+#include "msg.h"
+#include "shm.h"
+#include "file.h"
+#include "strinet.h"
+#include "env.h"
+#include "dbdefine.h"
+#include "nlogging.h"
+#include "hsmManagement.h"
+
+#define CHILD_PROC_ID_LEN (2)
+#define CHILD_PROC_EXE_ID_MIN (0)
+#define CHILD_PROC_EXE_ID_MAX (99)
+
+
+EXEC SQL INCLUDE SQLCA;
+
+int SockFd;
+int lock_fd;
+int HostPort;
+int ProcTotCnt = 0;
+int ProcExeId  = 0;
+pid_t CPid = -1;
+char HostAddr[20 + 1];
+char ExeName[12 + 1];   
+char NowDate[15 + 1];   
+char ServerGb[1 + 1];
+char SuDate[8 + 1] = {0x00, };   
+char SuTime[12 + 1] = {0x00, };    
+char SuPname[8 + 1] = {0x00, };     
+          
+char g_log_lvl[6 + 1] = {0x00, };	/* add kbh. 20170619 */
+
+void initSignal();
+void stopProc();
+void signalHandler();
+static void fatalSignalHandler(int signo);
+int loadDesKey();     
+int getLogLevel();        
+      
+static int check_running(const char *exeName);
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : main()                                                     */
+/* Description   :                                                            */
+/*----------------------------------------------------------------------------*/     
+main(argc, argv)
+int argc;     
+char *argv[];
+{
+	FILE* fp = NULL;
+	fd_set rset;
+	struct timeval tval;
+	int ret;   
+	int pingintval;
+	int read_flag;
+	int cnt;   
+	char *chptr;   
+	char tmps50[50 + 1];
+	      
+	OpHwnno = 1;    
+	SockFd = -1;
+	lock_fd = -1;    
+	memset(ExeName , 0x00 , sizeof(ExeName));                    
+	memcpy(ExeName , argv[0] , sizeof(ExeName)-1);         
+	CPid = getpid();
+	initLogging();   
+	initSignal();
+	if (argc != 2) {       
+		logging(logfp, "%d][%s:%d][ERROR] Invalid argument count[%d", CPid, __func__, __LINE__, argc);
+		stopProc();
+	}
+
+	memset(ServerGb , 0x00 , sizeof(ServerGb));
+	memcpy(ServerGb , argv[1] , sizeof(ServerGb)-1);    
+	memset(tmps50 , 0x00 , sizeof(tmps50));     
+	memcpy(tmps50 , ExeName + (strlen(ExeName) - CHILD_PROC_ID_LEN) , CHILD_PROC_ID_LEN);
+	errno = 0;
+	ProcExeId = strtol(tmps50, &chptr, 10);
+	if (errno == ERANGE || tmps50 == chptr || ProcExeId < CHILD_PROC_EXE_ID_MIN || ProcExeId > CHILD_PROC_EXE_ID_MAX) {
+		logging(logfp, "%d][%s:%d][ERROR] Invalid ProcExeId[%s", CPid, __func__, __LINE__, tmps50);
+		stopProc();
+	}         
+	//
+	memset(tmps50 , 0x00 , sizeof(tmps50));
+	snprintf(tmps50 , sizeof(tmps50) , "pidof %s | wc -w", ExeName);
+	fp = popen(tmps50, "r");      
+	fgets(tmps50 , sizeof(tmps50)-1 , fp);
+	pclose(fp);
+	if ((cnt = check_running(ExeName)) != NORMAL) {
+		logging(logfp, "ERROR] Process already has been running or Init fail [%s-%d", ExeName, cnt);   
+		printf("Process already has been running,  or Init fail [%s-%d]!
+",ExeName, cnt);
+		stopProc();
+	}
+
+	logging(logfp, "%d][%s:%d] ExeName : ServerGb ProcExeId[ %s : %s %d", CPid, __func__, __LINE__, ExeName, ServerGb, ProcExeId);
+	//
+	fp = popen("pwd" , "r");
+	fgets(tmps50, sizeof(tmps50)-1, fp);
+	pclose(fp);
+	tmps50[strlen(tmps50)-1] = '';
+	rtrimString(tmps50);
+	logging(logfp, "%d][%s:%d] run path : [%s", CPid, __func__, __LINE__, tmps50);
+	//
+	for (cnt = 1; cnt <= 100; cnt++) {
+		if (ora_db_connect("atmdba") != 0) {
+			if (cnt % 10 == 1) {
+				logging(logfp, "%d][%s:%d] DB Connect ERROR", CPid, __func__, __LINE__);
+			}
+		} else {
+			logging(logfp, "%d][%s:%d] DB Connect SUCCESS ", CPid, __func__, __LINE__);
+			break;
+		}
+		if (cnt >= 100) {
+			stopProc();
+		}
+		sleep(1);
+	}
+	if (getLogLevel() == ABNORMAL)
+    {
+		LOGGER(LOG_INFO,  "Log Level Get Error!", "");
+	}
+	else
+	{
+		LOGGER(LOG_DEBUG,  "Log Level Get [%d", custLoglevel);
+	}
+	if (loadDesKey() == ABNORMAL) {
+		LOGGER(LOG_ERROR, "%d]loadDesKey() Error![dpdeskey.conf] Check!", CPid);
+		stopProc();
+	}
+   	if (loadHostInfo() == ABNORMAL) {
+		LOGGER(LOG_ERROR, "%d] loadHostInfo()", CPid);
+	   	stopProc();
+	}
+	//
+	tval.tv_sec = 0;
+	tval.tv_usec = NH_USLEEP_INTVAL;
+	for (pingintval = 0; ; )
+	{
+		/*---------------------------------------------------------------*/
+		/* DP SERVER CONNECT                                             */
+		/*---------------------------------------------------------------*/
+		if (SockFd == -1) {
+			if (hostConnect() == ABNORMAL) {
+				sleep(1);
+				loadHostInfo();
+				continue;
+			}
+		}
+
+		if (clearBeforeData() == ABNORMAL)
+		{
+			sleep(1);
+			close(SockFd);
+			SockFd = -1;
+			loadHostInfo();
+			continue;
+		}
+
+		while (1)
+		{
+			cnt++;
+			checkDate();
+
+			if (cnt == 100*120)
+            {
+                if (getLogLevel() == ABNORMAL)
+					LOGGER(LOG_ERROR,  "Log Levle Get Error!","");
+
+                cnt = 0;
+            }
+
+			if (SockFd == -1) { break; }
+
+			/*---------------------------------------------------------------*/
+			/* Recv Data Processing From Host I/F    Oasis -> Iso8583        */
+			/*---------------------------------------------------------------*/
+			if (recvFromAITHER() == ABNORMAL) {
+				close(SockFd);
+				SockFd = -1;
+				break;
+			}
+
+			usleep(10000);
+
+			/*---------------------------------------------------------------*/
+			/* TCP Socket Check Read Event		                             */
+			/*---------------------------------------------------------------*/
+			read_flag = 0;
+			FD_ZERO(&rset);
+
+			if(SockFd != -1)
+				FD_SET(SockFd, &rset);
+
+			int maxfd = SockFd;
+
+			ret = select(maxfd+1, &rset, 0, 0, &tval);
+			if (ret == -1)
+			{
+				LOGGER(LOG_ERROR, "%d] get TCP Socket Trx event Error!", CPid);
+				break;
+			}
+			else if (ret == 0) /* timeout */
+			{
+				if (++pingintval >= NH_BIZ_TIMEOUT)
+				{
+					LOGGER(LOG_INFO, "%d] Time Stamp each %d seconds", CPid, (NH_BIZ_TIMEOUT/100)*2 );
+					pingintval = 0;
+				}
+			}
+			else
+			{
+				if(FD_ISSET(SockFd, &rset))	read_flag = 1;
+				else read_flag = 0;
+			}
+
+			if (read_flag > 0)
+			{
+				pingintval = 0;
+				/*-----------------------------------------------------------*/
+				/* TCP Socket Read Iso8583 -> Oasis           		 		 */
+				/*-----------------------------------------------------------*/
+				if (runBizProc(SockFd) == ABNORMAL)
+				{
+				   	close(SockFd);
+					SockFd = -1;      
+					break;    
+				}
+			}     
+		}       
+		usleep(100000);        
+	}                       
+
+	stopProc();        
+}
+/*----------------------------------------------------------------------------*/      
+/* Function Name : initSignal()                                               */
+/* Description   : System Signal Initial Processing                           */        
+/*----------------------------------------------------------------------------*/      
+void initSignal()
+{
+	signal(SIGHUP,    SIG_IGN    ); /* Hangup (01)                            */     
+	signal(SIGINT,    SIG_IGN    ); /* Interrupt (02)                         */     
+	signal(SIGILL ,   fatalSignalHandler  ); /* Illegal instruction (04)       */
+	signal(SIGTRAP,   SIG_IGN    ); /* Trace trap (05)                        */
+	signal(SIGFPE ,   fatalSignalHandler    ); /* Floating point exception (08) */
+	signal(SIGALRM,   signalHandler    ); /* Alarm Clock (14)                 */
+	signal(SIGUSR1,   SIG_IGN    ); /* User Signal 1 (16) : Process down      */      
+	signal(SIGUSR2,   SIG_IGN    ); /* User Signal 2 (17) : reserved          */
+	signal(SIGCHLD,   SIG_IGN    ); /* Child proc. terminated or stopped(18)  */
+	signal(SIGIO  ,   SIG_IGN    ); /* asynchronous I/O (22)                  */
+	signal(SIGTSTP,   SIG_IGN    ); /* Interactive stop signal (25)           */
+	signal(SIGCONT,   SIG_IGN    ); /* Continue if stopped (26)               */
+	signal(SIGTTIN,   SIG_IGN    ); /* Read from control terminal (27)        */
+	signal(SIGTTOU,   SIG_IGN    ); /* Write to control terminal (28)         */
+	signal(SIGURG ,   SIG_IGN    ); /* urgent condition on IO channel (29)    */
+	signal(SIGPIPE,   SIG_IGN    ); /* Pipe error (13)                        */
+	signal(SIGABRT,   fatalSignalHandler   ); /* Process abort (06)                */
+	signal(SIGTERM,   signalHandler   );
+	signal(SIGQUIT,   signalHandler   );
+	signal(SIGSTOP,   signalHandler   ); /* Stop signal (24)                  */
+	signal(SIGKILL,   signalHandler   ); /* Process Close Signal              */
+	signal(SIGBUS ,   fatalSignalHandler); /* Bus error (10)                    */
+	signal(SIGSEGV,   fatalSignalHandler); /* Segmentation Violation (11)       */
+	signal(SIGSYS ,   signalHandler   ); /* Bad argument to system call (12)  */
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : initLogging                                                */
+/* Description   : Log & Debug File Create                                    */
+/*----------------------------------------------------------------------------*/
+int initLogging()
+{
+	memset(NowDate , 0x00, sizeof(NowDate));
+	if (getDate(NowDate) == ABNORMAL) stopProc();
+
+	/*-------------------------------------------------------------------*/
+	/* Init Log File													 */
+	/*-------------------------------------------------------------------*/
+	if (logfp != (FILE *)NULL) fclose(logfp);
+	logfp = (FILE *)initLogFile(ExeName, "a+");
+	if (logfp == (FILE *)NULL)
+	{
+		stopProc();
+	}
+
+	logging(logfp, "%d][DEBUG]>>>>>>>>>>>>[[ Debug Starting ]]................", CPid);
+	logging(logfp, "%d][LOGG]>>>>>>>>>>>>[[ Log Starting ]]..................", CPid);
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* date modify check                                                          */
+/*----------------------------------------------------------------------------*/
+int checkDate()
+{
+	char tmp[21] = {0x00, };
+
+	if (getDate(tmp) == NORMAL)
+	{
+		if (memcmp(NowDate, tmp, 8))
+		{
+			sprintf(NowDate, "%.14s", tmp);
+			initLogging();
+		}
+	}         
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : runBizProc                                                 */      
+/* Description   : Socket Read & Biz/Line Check Data Processing               */
+/*----------------------------------------------------------------------------*/
+int runBizProc(int SockFd)
+{
+	int  trlen;
+	char trdat[MAX_DPDATALEN+1] = {0x00, };
+	char msgtype[ 4 + 1] 		= {0x00, };
+	char pcode[ 6 + 1] 			= {0x00, };
+	char napas_data[4000 +1] 	= {0x00, };
+
+	/*---------------------------------------------------------------*/
+	/* DP => DP I/F(SWITCHING SERVER) : DATA RECEIVE                 */
+	/*---------------------------------------------------------------*/
+	memset(napas_data, 0x00 , sizeof(napas_data));
+	memset(RecvBuffer, 0x00 , sizeof(RecvBuffer));
+	initCoreStructure(0x20);
+
+	if (recvFromNAPAS(napas_data, &trlen, SockFd) == ABNORMAL)
+	{
+		LOGGER(LOG_ERROR, "%d] trlen[%d!", CPid, trlen);
+		return ABNORMAL;
+	}
+    
+	/*--------------------------------------------------------*/
+	/* copy napas_data(ISO8583) -> OasisMsg                   */
+	/*--------------------------------------------------------*/
+	memset(msgtype  , 0x00 , sizeof(msgtype));
+	memset(pcode    , 0x00 , sizeof(pcode  ));
+
+	memcpy(msgtype, &napas_data[4], 4);
+
+	if (msgtype[0] == '9')    
+	{
+		LOGGER(LOG_INFO, "%d] msgtype [%s", CPid, msgtype);
+		return NORMAL;
+	}
+
+	memcpy(RecvBuffer, &napas_data[4], trlen);
+	RecvLength = trlen;
+	/*-------------------------------------------------------------*/
+	/* network messages process (echo , sign-on/off, key exchange) */
+	/*-------------------------------------------------------------*/   
+	if (memcmp(msgtype, "0800", 4) == 0 || memcmp(msgtype, "0810", 4) == 0)
+	{   
+		if (recvNetworkMgmt(msgtype) == ABNORMAL)
+		{
+			return ABNORMAL;
+		}
+
+		/*---------------------------------------------------------------*/      
+		/* DPIF -> DP : respond network msg immediately                  */
+		/*---------------------------------------------------------------*/
+		if (memcmp(&SendBuffer[4], "0800", 4) == 0)   
+		{
+			memcpy(&SendBuffer[4], "0810", 4);         
+			sendNetworkRspNAPAS();     
+			LOGGER(LOG_DEBUG, "%d][WRIT][DPIF -> HOSTIF][SendLength[%d], SendBuffer[%s", CPid, SendLength, SendBuffer);
+		}
+		return NORMAL;
+	}
+
+	LOGGER(LOG_INFO, "%d] Recv From NAPAS : [%s", CPid, napas_data);               
+
+	/*---------------------------------------------------------------*/    
+	/* DP I/F: ISO8583 -> OASIS modify DATA                          */
+	/*---------------------------------------------------------------*/      
+
+	if (Iso8583toOasis(1, msgtype, pcode, g_log_lvl) == ABNORMAL)
+	{
+		return ABNORMAL;
+	}
+
+	LOGGER(LOG_INFO, "%d][RECV][DPIF <- DP    ][msgtype=%.*s pcode=%.*s][recv_svc_c=%.*s][glob_id=%.*s%.*s][traceNo=%.*s][respcd=%.*s", CPid 
+	   			 , sizeof(MsgData.msgtype), MsgData.msgtype, sizeof(MsgData.bit_3), MsgData.bit_3
+				 , sizeof(MsgHead.recv_svc_c) , MsgHead.recv_svc_c
+				 , sizeof(MsgHead.glob_id) , MsgHead.glob_id
+				 , sizeof(MsgHead.step) , MsgHead.step
+		  		 , sizeof(MsgData.bit_11), MsgData.bit_11
+		  		 , sizeof(MsgData.bit_39), MsgData.bit_39
+	);
+
+	if(memcmp(msgtype, "0200", 4) == 0 || memcmp(msgtype, "0420", 4) == 0)
+	{
+		makeHostSendMsg(2, trdat);
+	}
+	else
+	{
+		makeHostSendMsg(1, trdat);
+	}
+
+
+	if (insertToSWSNAPRCV(napas_data, trdat) == ABNORMAL )
+	 	return ABNORMAL;
+
+
+	/*---------------------------------------------------------------*/
+	/* DP I/F -> HOST I/F SEND DATA Message                          */
+	/*---------------------------------------------------------------*/
+	if (sendToAITHER(trdat, strlen(trdat)) == ABNORMAL)
+	{
+		LOGGER(LOG_ERROR, "%d] DP I/F -> HOST I/F put data to MSGQ FAIL", CPid);
+		return ABNORMAL;
+	}
+
+	return NORMAL;
+}    
+/*----------------------------------------------------------------------------*/          
+/* FUNCTION : sendToAITHER                                                    */
+/* SUBJECT  : put Data to Host I/F MSGQ                                       */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int sendToAITHER(sdata, slen)
+char *sdata;
+int  slen;
+{
+
+	/*---------------------------------------------------------------*/
+	/* DP I/F -> HOST I/F put data to MSGQ                           */
+	/*---------------------------------------------------------------*/
+	if (insertToSWSANYSND(sdata, "a") == ABNORMAL)
+		return ABNORMAL;
+
+
+	LOGGER(LOG_DEBUG, "%d][DPIF -> HOSTIF] SEND_DATA : 
+[%.*s", CPid, strlen(sdata), sdata);
+	LOGGER(LOG_INFO, "%d][WRIT][DPIF -> HOSTIF][msgtype=%.*s pcode=%.*s][recv_svc_c=%.*s][glob_id=%.*s%.*s][traceNo=%.*s][respcd=%.*s", CPid
+				 , sizeof(MsgData.msgtype), MsgData.msgtype, sizeof(MsgData.bit_3), MsgData.bit_3
+				 , sizeof(MsgHead.recv_svc_c) , MsgHead.recv_svc_c
+				 , sizeof(MsgHead.glob_id) , MsgHead.glob_id
+				 , sizeof(MsgHead.step) , MsgHead.step
+				 , sizeof(MsgData.bit_11) , MsgData.bit_11           
+				 , sizeof(MsgData.bit_39) , MsgData.bit_39       
+	);    
+                 
+	return NORMAL;             
+}                     
+             
+/*----------------------------------------------------------------------------*/      
+/* FUNCTION : recvFromNAPAS                                                   */                  
+/* SUBJECT  : DP => SWITCHING SERVER : DATA RECEIVE                           */    
+/* RETURN   : SUCCESS: NORMAL                                                 */           
+/*----------------------------------------------------------------------------*/
+int recvFromNAPAS(rdata, rlen, SockFd)    
+char *rdata;
+int *rlen;
+int SockFd;
+{      
+	int		iret, ilen;
+	char	hlength[5];
+
+	memset(hlength, 0x00, sizeof(hlength));
+	ilen = 4;
+
+   	if ((iret = readSocket(SockFd, rdata, ilen)) < ilen)
+   	{
+		LOGGER(LOG_ERROR, "%d] readSocket (SockFd=%d iret=%d) ERROR 1", CPid, SockFd, iret);
+		SockFd = -1;
+		if (iret == -1) LOGGER(LOG_ERROR, "%d] probably disconnected by NAPAS", CPid);
+	   	return ABNORMAL;
+   	}
+
+	strncpy(hlength, rdata, 4);
+
+	if ((ilen = atoi(hlength)) <= 0)
+	{
+		LOGGER(LOG_ERROR, "%d] Read Data Length <= 0 data=[%s]", CPid, rdata);
+		return ABNORMAL;
+	}
+
+   	if ((iret = readSocket(SockFd, &rdata[4], ilen)) <= 0)
+   	{
+		LOGGER(LOG_ERROR, "%d] readSocket [SockFd=%d recvLength=%d OasisMsg.totlen=%d] ERROR 2", CPid, SockFd, iret, ilen);
+		SockFd = -1;
+	   	return ABNORMAL;
+   	}
+
+	*rlen = ilen;
+
+	LOGGER(LOG_DEBUG, "%d][RECV][DP -> DPIF   ] SecondFlag[%d] recvlen[%d] trdat[%s", CPid, SecondFlag, ilen, &rdata[0]);
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : stopProc()                                                 */
+/* Description   : Main Process Stop and Socket Close and Program Exit        */
+/*----------------------------------------------------------------------------*/
+void stopProc()
+{
+	// DB Disconnect
+	EXEC SQL ROLLBACK WORK RELEASE;
+	/*-------------------------------------------------------------------*/
+	/* PROGRAM DOWN INFO UPDATE TO SHARED MEMORY                         */
+	/*-------------------------------------------------------------------*/
+	if (SockFd >= 0)
+	{
+		shutdown(SockFd, SHUT_RDWR);
+		close(SockFd);
+		SockFd = -1;
+	}
+
+	if (logfp != (FILE *)NULL)
+	{
+		LOGGER(LOG_INFO, "%d] DB Disconnected .. ", CPid);
+		LOGGER(LOG_INFO,"%d][LOGG]>>>>>> PROCESS SHUTDOWN COMPLETE............[OK]", CPid);
+		LOGGER(LOG_INFO,"%d][LOGG]............[[ END OF LOGGING ]]................", CPid);
+		fclose(logfp);
+	}
+
+	exit(0);
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : signalHandler()                                            */
+/* Description   : Signal handler                                             */
+/*----------------------------------------------------------------------------*/
+void signalHandler(int signo){
+	switch(signo){
+		case SIGALRM :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGALRM");
+			alarm_handler();
+			break;
+		case SIGABRT :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGABRT");
+			stopProc_sig();
+			break;
+		case SIGQUIT :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGQUIT");
+			stopProc_sig();
+			break;
+		case SIGSTOP :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGSTOP");
+			stopProc_sig();     
+			break;
+		case SIGKILL :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGKILL");
+			stopProc_sig();
+			break;
+		case SIGBUS :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGBUS");
+			stopProc_sig();   
+			break;
+		case SIGSEGV :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGSEGV");
+			stopProc_sig();
+			break;
+		case SIGSYS :     
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGSYS");
+			stopProc_sig();
+			break;
+		case SIGTERM :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGTERM");
+			stopProc_sig();
+			break;
+		case SIGCHLD :
+			LOGGER(LOG_INFO, "%d] signo : [%d : %s", CPid, signo, "SIGCHLD");
+			stopProc_sig();
+			break;
+		default :    
+			break;   
+	}
+}
+
+void fatalSignalHandler(int signo){    
+	LOGGER(LOG_ERROR, "=================[%d : %s]=================", signo, "FATALSIG");
+	int MAX_STACK_FRAME = 64, i = 0;    
+	void *buffer[MAX_STACK_FRAME];
+	int nptrs = backtrace(buffer, MAX_STACK_FRAME);
+
+	char **symbols = backtrace_symbols(buffer, nptrs);
+
+	if(symbols != NULL){
+		for(i = 0; i < nptrs; i++){
+			LOGGER(LOG_ERROR, "===>[%s", symbols[i]);
+		}
+	}
+	stopProc_sig();
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : stopProc_sig()                                             */
+/* Description   : stop proc sig handler                                      */
+/*----------------------------------------------------------------------------*/
+void stopProc_sig()
+{
+	EXEC SQL ROLLBACK WORK RELEASE;
+	/*-------------------------------------------------------------------*/
+	/* PROGRAM DOWN INFO UPDATE TO SHARED MEMORY                         */
+	/*-------------------------------------------------------------------*/
+	if (SockFd >= 0){
+		shutdown(SockFd, SHUT_RDWR);
+		close(SockFd);
+		SockFd = -1;
+	}
+
+	if(lock_fd >= 0){      
+		close(lock_fd);
+		lock_fd = -1;     
+	}     
+             
+	if (logfp != (FILE *)NULL)    
+	{
+		LOGGER(LOG_INFO,"%d][LOGG]>>>>>> PROCESS SHUTDOWN COMPLETE............[OK]", CPid);                                                 
+		LOGGER(LOG_INFO,"%d][LOGG]............[[ END OF LOGGING ]]................", CPid);
+		fclose(logfp);
+	}
+
+	exit(0);     
+}
+
+/*----------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
+int loadDesKey()
+{
+	memset(DesClearKey, 0x00, sizeof(DesClearKey));
+	if (getConfigData("DP_CLEARKEY", DesClearKey) == ABNORMAL)
+		return ABNORMAL;
+	LOGGER(LOG_INFO, "%d]>>> NAPAS DP_CLEARKEY [%s", CPid, DesClearKey);
+
+	memset(DesClearKey2, 0x00, sizeof(DesClearKey2));
+	if (getConfigData("DP_CLEARKEY2", DesClearKey2) == ABNORMAL)
+		return ABNORMAL;
+	LOGGER(LOG_INFO, "%d]>>> NAPAS DP_CLEARKEY2 [%s", CPid, DesClearKey2);   
+
+	memset(ZAKKey, 0x00, sizeof(ZAKKey));
+	if (getConfigData("DP_V2_ZAKKEY", ZAKKey) == ABNORMAL)
+		return ABNORMAL;
+	LOGGER(LOG_INFO, "%d]>>> DP_V2_ZAKKEY [%s", CPid, ZAKKey);
+
+	return NORMAL;
+}
+/*----------------------------------------------------------------------------*/
+/* DP SERVER INFO LOADING (dpifcli.conf file loading)                         */
+/*----------------------------------------------------------------------------*/
+int loadHostInfo()
+{
+EXEC SQL BEGIN DECLARE SECTION;  
+	int  hostCnt = 0;
+	char hostAddr[20 + 1];
+	char hostPort[20 + 1];
+	char temp   [30 + 1];
+EXEC SQL END DECLARE SECTION;   
+
+	// Get HOSTCOUNT
+	memset(temp, 0x00, sizeof(temp));
+	memcpy(temp, "DP_IBT_O_V2_CNT", sizeof(temp)-1);
+	rtrimString(temp);
+	LOGGER(LOG_INFO, "%d] Get host info : [%s", CPid, temp);
+
+	EXEC SQL
+	SELECT TO_NUMBER(ATM_ESTBLS_NM)
+	  INTO :hostCnt
+	  FROM DBOWN.GAT_SWSCONF_INF
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = :temp
+	;
+	if (SQL_ERROR) {
+		if (SQLCODE == -3114 ) {
+			if (ora_db_connect("atmdba") != 0) {
+				LOGGER(LOG_ERROR, "%d] DB Reconnect ERROR ", CPid);
+			}
+		}
+		LOGGER(LOG_ERROR, "%d] SELECT SQL ERROR [%d", CPid, SQLCODE);
+		return ABNORMAL;
+	}
+	LOGGER(LOG_INFO, "%d] HOSTCOUNT : [%d", CPid, hostCnt);
+	ProcTotCnt = hostCnt;
+
+	// Get HOSTADDR
+	memset(hostAddr, 0x00, sizeof(hostAddr));
+	memset(temp, 0x00, sizeof(temp));
+	snprintf(temp, sizeof(temp), "DP_IBT_O_V2_ADDR%d", ProcExeId);
+	rtrimString(temp);
+	LOGGER(LOG_INFO, "%d] Get host info : [%s", CPid, temp);
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM
+		INTO :hostAddr
+		FROM DBOWN.GAT_SWSCONF_INF
+		WHERE SH_LCL_CORP_C = 130
+		AND ATM_ESTBLS_TRX_C = 'CONF'
+		AND ATM_ESTBLS_ID = :temp
+	;
+	if (SQL_ERROR) {
+		LOGGER(LOG_ERROR, "%d] SELECT SQL ERROR [%d", CPid, SQLCODE);
+		return ABNORMAL;
+	}
+	rtrimString(hostAddr);
+	memset(HostAddr, 0x00, sizeof(HostAddr));
+	memcpy(HostAddr, hostAddr, sizeof(HostAddr)-1);
+	LOGGER(LOG_INFO, "%d] HOSTADDR : [%s", CPid, HostAddr);
+
+	// Get HOSTPORT
+	memset(hostPort, 0x00, sizeof(hostPort));
+	memset(temp, 0x00, sizeof(temp));
+	snprintf(temp, sizeof(temp), "DP_IBT_O_V2_PORT%d", ProcExeId);
+	rtrimString(temp);
+	LOGGER(LOG_INFO, "%d] Get host info : [%s", CPid, temp);
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM
+		INTO :hostPort
+		FROM DBOWN.GAT_SWSCONF_INF
+		WHERE SH_LCL_CORP_C = 130
+		AND ATM_ESTBLS_TRX_C = 'CONF'
+		AND ATM_ESTBLS_ID = :temp
+	;
+	if (SQL_ERROR) {
+		LOGGER(LOG_ERROR, "%d] SELECT SQL ERROR [%d", CPid, SQLCODE);
+		return ABNORMAL;
+	}   
+	HostPort = atoi(hostPort);
+	LOGGER(LOG_INFO, "%d] HOSTPORT : [%d", CPid, HostPort);
+
+	memset(hsm_Port01, 0x00, sizeof(hsm_Port01));
+	if (getConfigData("HSM_HOSTPORT1", hsm_Port01) == ABNORMAL){
+		LOGGER(LOG_ERROR,"Load HSM Port Fail", "");
+		return ABNORMAL; 
+	}
+    
+	memset(hsm_Ip01, 0x00, sizeof(hsm_Ip01));
+	if (getConfigData("HSM_HOSTADDR1", hsm_Ip01) == ABNORMAL){
+		LOGGER(LOG_ERROR,"Load HSM Address Fail", "");
+		return ABNORMAL; 
+	} 
+
+	return NORMAL;
+}
+
+/*------------------------------------------------------------------------------*/
+/* CONNECT TO NAPAS FOR IBT														*/
+/*------------------------------------------------------------------------------*/
+// add kbh 20171212 for connecting to NAPAS trx. IBT
+int hostConnect()
+{
+	if (SockFd > 0) close(SockFd);
+	SockFd = -1;
+	checkDate();
+	LOGGER(LOG_INFO, "%d] NAPAS SERVER CONNECT TRYING...%s:%d", CPid, HostAddr, HostPort);
+
+	alarm(10);
+	if ((SockFd = initClientSocket(HostPort, HostAddr, 1)) == ABNORMAL) {
+		LOGGER(LOG_ERROR, "%d] CONNECT FAIL TO IPS [%s:%d]. SockFd[%d", CPid, HostAddr, HostPort, SockFd);
+		return ABNORMAL;
+	}
+	alarm(0);
+
+	LOGGER(LOG_INFO, "%d] CONNECTED TO IPS [%s:%d]. SockFd[%d", CPid, HostAddr, HostPort, SockFd);
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : recvFromAITHER                                             */
+/* Description   : Recv Data From Host I/F Processing                         */
+/*----------------------------------------------------------------------------*/
+int recvFromAITHER()
+{
+	int     ix;
+	char    trdat [MAX_DPDATALEN+1];
+	char    msgtype[5] = {0x00, };
+	char    pcode  [7] = {0x00, };
+  
+	memset(trdat  , 0x00, sizeof(trdat  ));
+	initCoreStructure(0x00);   
+
+	/*---------------------------------------------------------------*/
+	/* DP I/F <- HOST I/F Message                                    */
+	/*---------------------------------------------------------------*/
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		char sel_date   [ 8 + 1] = {0x00, };
+		char sel_time   [12 + 1] = {0x00, };
+		char sel_pname  [20 + 1] = {0x00, };
+		char sel_data   [4000 + 1] = {0x00, };
+		char c_tmp      [ 3 + 1] = {0x00, };
+		char ibt_msg_t  [4  + 1] = {0x00, };
+		int tot_cnt = ProcTotCnt;
+		int exe_id  = ProcExeId;
+	EXEC SQL END DECLARE SECTION;
+
+	memcpy(c_tmp, "IPS", sizeof(c_tmp) -1 );
+	memcpy(ibt_msg_t, "0200", sizeof(ibt_msg_t) -1 );
+
+	EXEC SQL DECLARE c_napsndInfo CURSOR FOR
+	SELECT /*+ INDEX_SS(GAT_SWSNAPSND_LOG GAT_SWSNAPSND_LOG_IX_04) */
+		TRX_DT, ATM_LGGTM
+	  FROM DBOWN.GAT_SWSNAPSND_LOG
+	 WHERE SH_LCL_CORP_C = 130
+	   AND TRX_DT >= TO_CHAR(SYSDATE -1, 'YYYYMMDD')
+	   AND NAPAS_PROC_ID = :c_tmp
+	   AND NORM_PROC_YN = 0
+	   AND MOD(MOD(ATM_TRX_TRACE_NO, 10), :tot_cnt) = :exe_id
+	   AND ATM_MSG_T_ID = NVL(:ibt_msg_t,ATM_MSG_T_ID) 
+	   AND ROWNUM < 4
+	 ORDER BY TRX_DT, ATM_LGGTM ASC
+	;
+
+	EXEC SQL OPEN c_napsndInfo;
+
+	while(1)
+	{
+		memset(sel_date, 0x00, sizeof(sel_date) -1 );   
+		memset(sel_time, 0x00, sizeof(sel_time) -1 );
+		memset(sel_pname, 0x00, sizeof(sel_pname) -1 );
+		memset(sel_data, 0x00, sizeof(sel_data) -1 );
+
+		EXEC SQL FETCH c_napsndInfo INTO :sel_date, :sel_time;
+ 
+		if (sel_date[0] == 0x00 || sel_date[0] == 0x20)
+			break;
+
+		LOGGER(LOG_DEBUG, "%d] sel_date : sel_time [%s : %s", CPid, sel_date, sel_time);
+		EXEC SQL
+		SELECT PGM_NM_ID, ATM_MSG_DTL_CTT
+		  INTO :sel_pname, :sel_data
+		  FROM DBOWN.GAT_SWSNAPSND_LOG
+		 WHERE SH_LCL_CORP_C = 130
+		   AND TRX_DT = :sel_date
+		   AND ATM_LGGTM = :sel_time
+		   AND NAPAS_PROC_ID = :c_tmp
+		   AND NORM_PROC_YN = 0
+		 ORDER BY TRX_DT, ATM_LGGTM ASC
+		;        
+		if (SQL_ERROR)    
+		{
+			if (SQL_NOTFOUND)
+			{
+				EXEC SQL CLOSE c_napsndInfo;
+				LOGGER(LOG_DEBUG, "%d] SELECT DATA FOT FOUND", CPid);
+				return NODATA;
+			}
+			LOGGER(LOG_ERROR, "%d] SELECT ERROR : [%d", CPid, SQLCODE);
+			EXEC SQL CLOSE c_napsndInfo;
+			return ABNORMAL;
+		}
+		else
+		{
+			EXEC SQL
+			UPDATE DBOWN.GAT_SWSNAPSND_LOG
+			   SET NORM_PROC_YN = 1
+			 WHERE SH_LCL_CORP_C = 130
+			   AND TRX_DT = :sel_date
+			   AND ATM_LGGTM = :sel_time
+			   AND NAPAS_PROC_ID = :c_tmp
+			   AND NORM_PROC_YN = 0
+			;
+			if (SQL_ERROR)
+			{
+				LOGGER(LOG_ERROR, "%d] UPDATE SELECT ERROR : [%d", CPid, SQLCODE);
+				EXEC SQL ROLLBACK WORK;
+				EXEC SQL CLOSE c_napsndInfo;
+				return ABNORMAL;
+			}
+			else
+			{       
+				LOGGER(LOG_DEBUG, "%d] UPDATE SUCCESS : [%s:%s", CPid, sel_date, sel_time);
+				EXEC SQL COMMIT WORK;
+			}
+		}
+
+		memset(SuDate, 0x00, sizeof(SuDate) -1);
+		memcpy(SuDate, sel_date, sizeof(SuDate) -1);
+		memset(SuTime, 0x00, sizeof(SuTime) -1);
+		memcpy(SuTime, sel_time, sizeof(SuTime) -1);
+		memset(SuPname, 0x00, sizeof(SuPname) -1);
+		memcpy(SuPname, sel_pname, sizeof(SuPname) -1);
+
+		rtrimString(sel_data);
+		memcpy(trdat, sel_data, strlen(sel_data) );
+
+		/*---------------------------------------------------------------*/
+		/* DP I/F <- HOST I/F DATA SETTING - 1636 byte                   */
+		/*---------------------------------------------------------------*/
+		ix = 0;
+		memcpy(&ChnlHead, &trdat[ix], sizeof(ChnlHead)); 
+		ix += sizeof(ChnlHead);
+		memcpy(&MsgHead , &trdat[ix], sizeof(MsgHead ));     
+		ix += sizeof(MsgHead);
+		memcpy(&MsgFix  , &trdat[ix], sizeof(MsgFix  )); 
+		ix += sizeof(MsgFix);
+     
+		memcpy(&MsgData , &trdat[ix], sizeof(MsgData )); 
+		memcpy(msgtype, MsgData.msgtype, sizeof(MsgData.msgtype));          
+		memcpy(pcode  , MsgData.bit_3  , sizeof(MsgData.bit_3));                              
+
+    
+		LOGGER(LOG_DEBUG, "%d][HOSTIF -> DPIF] RECV_DATA : [%.*s", CPid, strlen(trdat), trdat);
+
+		LOGGER(LOG_INFO, "%d][HOSTIF -> DPIF][msgtype=%.*s pcode=%.*s][respcd=%.*s][date=%.*s][termno=%.*s][traceno=%.*s][cardno=%.*s", CPid
+	   			 , sizeof(MsgData.msgtype)  , MsgData.msgtype              
+	   			 , sizeof(MsgData.bit_3)    , MsgData.bit_3
+		   		 , sizeof(MsgData.bit_39)   , MsgData.bit_39
+		   		 , sizeof(MsgData.bit_7)    , MsgData.bit_7
+		   		 , sizeof(MsgData.bit_41)   , MsgData.bit_41
+		   		 , sizeof(MsgData.bit_11)   , MsgData.bit_11              
+		   		 , sizeof(MsgData.bit_2)    , MsgData.bit_2	);     
+
+
+		/*---------------------------------------------------------------*/
+		/* DP I/F <- HOST I/F DATA SETTING                               */
+		/*---------------------------------------------------------------*/
+		if (!memcmp(msgtype, "0200", 4) || !memcmp(msgtype, "0420", 4))
+		{
+			saveMsgheadtoFifo(g_log_lvl);
+		}
+
+		/*---------------------------------------------------------------*/
+		/* DP I/F -> DP modify DATA                                      */
+		/*---------------------------------------------------------------*/
+		LOGGER(LOG_DEBUG, "%d] : OasistoIso8583 start msgtype[%s] pcode [%s]...", CPid, msgtype, pcode);
+		if (OasistoIso8583(1, msgtype, pcode, g_log_lvl) == ABNORMAL)
+		{
+			EXEC SQL CLOSE c_napsndInfo;
+			return NORMAL;
+		}
+         
+		/*---------------------------------------------------------------*/
+		/* DP I/F -> DP send DATA                                        */
+		/*---------------------------------------------------------------*/
+		if (sendToNAPAS() == ABNORMAL)
+		{
+			EXEC SQL CLOSE c_napsndInfo;
+			return ABNORMAL;
+		}
+
+	}
+	EXEC SQL CLOSE c_napsndInfo;
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : sendToNAPAS                                                     */
+/* SUBJECT  : Send Data to NAPAS                                              */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int sendToNAPAS()
+{
+	int   iret;
+
+	if ((iret = writeSocket(SockFd, SendBuffer, SendLength+4)) <= 0)
+	{
+		LOGGER(LOG_ERROR, "%d] writeSocket() IPS FAIL [%d", CPid, errno);
+		return ABNORMAL;
+	}
+    
+	if (SendLength+4 != iret)
+	{
+		LOGGER(LOG_ERROR, "%d] INCORRECT LENGTH of SENT DATA to NAPAS [send=%d sent=%d", CPid, SendLength+4, iret);
+		return ABNORMAL;
+	}
+    
+	// IOS8583 tranfer data update    
+	updateSWSNAPSND();
+
+	LOGGER(LOG_INFO, "%d][SEND][DPIF -> DP    ][%s", CPid, SendBuffer);
+
+	LOGGER(LOG_INFO, "%d][SEND][DPIF -> DP    ][msgtype=%.*s pcode=%.*s][recv_svc_c=%.*s][glob_id=%.*s%.*s][traceNo=%.*s][respcd=%.*s", CPid
+		   		 , sizeof(MsgData.msgtype), MsgData.msgtype, sizeof(MsgData.bit_3), MsgData.bit_3
+				 , sizeof(MsgHead.recv_svc_c) , MsgHead.recv_svc_c
+				 , sizeof(MsgHead.glob_id) , MsgHead.glob_id
+				 , sizeof(MsgHead.step) , MsgHead.step
+		   		 , sizeof(MsgData.bit_11), MsgData.bit_11
+		   		 , sizeof(MsgData.bit_39), MsgData.bit_39
+	);
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : sendNetworkRspNAPAS                                             */     
+/* SUBJECT  : Send Network Data to NAPAS                                      */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int sendNetworkRspNAPAS()    
+{
+	int tcpcnt;
+
+	if ((writeSocket(SockFd, SendBuffer, SendLength+4)) <= 0)
+	{
+		LOGGER(LOG_ERROR, "%d] writeSocket() IPS FAIL [%d][%s", CPid, errno, UNIX_ERRMSG);
+		return ABNORMAL;
+	}
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : getLogLevel                                                     */
+/* SUBJECT 	: get log level                                                   */
+/* RETURN 	: NORMAL                                                   		  */
+/*----------------------------------------------------------------------------*/
+int getLogLevel()    
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		char loglevel[80] = {0x00, };	
+		char atm_estbls_id[20] = {0x00, };	
+	EXEC SQL END DECLARE SECTION;
+
+	sprintf(atm_estbls_id, "LOGLVL_%.8s", ExeName);
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM
+	  INTO :loglevel
+	  FROM DBOWN.GAT_SWSCONF_INF     
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = UPPER(:atm_estbls_id)
+	;
+
+	if (SQL_ERROR)   
+	{
+		custLoglevel = LOG_INFO;
+		LOGGER(LOG_ERROR, "SELECT SQL ERROR [%d", SQLCODE);
+	}else{
+		trimString(loglevel);
+		custLoglevel = atoi(loglevel);
+	}
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/   
+/* FUNCTION : getConfigData                                                   */
+/* SUBJECT  : get conf data                                                   */
+/* PARAM 	: char* key, out : char* value                               	  */
+/* RETURN 	: NORMAL                                                   		  */
+/*----------------------------------------------------------------------------*/
+int getConfigData(char* key, char* value)
+{   
+	EXEC SQL BEGIN DECLARE SECTION;
+		char c_key[20 + 1] = {0x00, };
+		char c_value[40 + 1] = {0x00, };
+	EXEC SQL END DECLARE SECTION;
+
+	memcpy(c_key, key, strlen(key) );
+	LOGGER(LOG_INFO, "%d] c_key : [%s", CPid, c_key);
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM
+	  INTO :c_value
+	  FROM DBOWN.GAT_SWSCONF_INF
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = :c_key
+	;
+
+	if (SQL_ERROR)
+	{
+		LOGGER(LOG_ERROR, "%d] SELECT SQL ERROR [%d", CPid, SQLCODE);
+		return ABNORMAL;
+	}
+	rtrimString(c_value);
+	memcpy(value, c_value, strlen(c_value) );
+	LOGGER(LOG_INFO, "%d] c_value : [%s", CPid, c_value);
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : clearBeforeData                                                 */
+/* SUBJECT	: Data Clear                                                      */
+/* RETURN 	: NORMAL 	                                                      */
+/*----------------------------------------------------------------------------*/
+int clearBeforeData()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		char c_gb[ 3 + 1] = {0x00, };
+		int tot_cnt  = ProcTotCnt;
+		int exe_id   = ProcExeId;
+	EXEC SQL END DECLARE SECTION;
+	memcpy(c_gb, "IPS", sizeof(c_gb) -1 );
+
+	EXEC SQL
+	UPDATE DBOWN.GAT_SWSNAPSND_LOG
+		SET NORM_PROC_YN = 2
+	WHERE SH_LCL_CORP_C = 130
+		AND NAPAS_PROC_ID = :c_gb
+		AND NORM_PROC_YN = 0
+		AND MOD(MOD(ATM_TRX_TRACE_NO, 10), :tot_cnt) = :exe_id
+	;
+
+	if (SQL_ERROR) {
+		if (SQLCODE == -3114) {
+			if (ora_db_connect("atmdba") != 0) {
+				LOGGER(LOG_ERROR, "%d] DB Reconnect ERROR ", CPid);
+			} 
+		}
+		if (SQL_NOTFOUND) {
+			LOGGER(LOG_INFO, "%d] DATA NOT FOUND", CPid);
+		} else {
+			LOGGER(LOG_ERROR, "%d] UPDATE  ERROR : [%d", CPid, SQLCODE);
+			EXEC SQL ROLLBACK WORK;
+			return ABNORMAL;
+		}
+	} else {
+		EXEC SQL COMMIT WORK;
+	}
+	LOGGER(LOG_INFO, "%d] UPDATE SUCCESS : [%s", CPid, c_gb);
+	return NORMAL;
+}
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : updateSWSNAPSND()                                               */
+/* SUBJECT : NAPAS send Data UPDATE                                           */
+/* RETURN 	: NORMAL		                                                  */
+/*----------------------------------------------------------------------------*/
+int updateSWSNAPSND()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		char u_data	[500 + 1] = {0x00, };
+		char c_tmp	[  3 + 1] = {0x00, };
+		char c_date [  8 + 1] = {0x00, };
+		char c_time [ 12 + 1] = {0x00, };
+	EXEC SQL END DECLARE SECTION;
+
+	memcpy(u_data, SendBuffer, sizeof(u_data) -1 );
+	memcpy(c_date, SuDate, strlen(SuDate) );
+	memcpy(c_time, SuTime, strlen(SuTime) );
+	memcpy(c_tmp, "IPS", sizeof(c_tmp) -1);
+
+	LOGGER(LOG_DEBUG, "%d]c_date:c_time:c_tmp [%s:%s:%s", CPid, c_date, c_time, c_tmp);
+
+	EXEC SQL
+	UPDATE DBOWN.GAT_SWSNAPSND_LOG
+		SET NAPAS_MSG_DTL_CTT = :u_data
+	WHERE SH_LCL_CORP_C = 130
+		AND TRX_DT = :c_date
+		AND ATM_LGGTM = :c_time
+		AND NAPAS_PROC_ID = :c_tmp
+	   	AND NORM_PROC_YN = 1
+	;
+
+	if (SQL_ERROR)
+	{
+		if (SQL_NOTFOUND)
+		{
+			EXEC SQL ROLLBACK WORK;
+			LOGGER(LOG_ERROR, "%d] UPDATE SQL NOTFOUND ", CPid);
+			return NORMAL;
+		}
+		LOGGER(LOG_ERROR, "%d] UPDATE SQL ERROR [%d", CPid, SQLCODE);
+		EXEC SQL ROLLBACK WORK;
+		return ABNORMAL;
+	}
+	EXEC SQL COMMIT WORK;
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : insertSWSNAPRCV()                                               */
+/* SUBJECT  : NAPAS Network Data INSERT                                       */
+/* PARAM    : int gb(in), char* sdata                                         */
+/* RETURN 	: NORMAL                                                          */
+/*----------------------------------------------------------------------------*/
+int insertToSWSNAPRCV(char* napas_data, char* sdata)
+{
+	char c_trx_brno             [ 4 + 1] = {0x00, };
+	char c_atm_trx_tmn_no       [ 4 + 1] = {0x00, };
+	char c_atm_trx_trace_no     [ 6 + 1] = {0x00, };
+	char c_atm_trx_amt          [12 + 1] = {0x00, };
+	char c_atm_acpn_man_rcgn_c  [11 + 1] = {0x00, };
+	char c_stmt_amt             [12 + 1] = {0x00, };
+	char c_claim_amt            [12 + 1] = {0x00, };
+	char c_stmt_exrt            [ 8 + 1] = {0x00, };
+	char c_claim_exrt           [ 8 + 1] = {0x00, };
+	char c_atm_dspch_org_rcgn_c [11 + 1] = {0x00, };
+	char c_nap_data             [500+ 1] = {0x00, };
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		int  trx_brno               = 0;
+		int  atm_trx_trace_no       = 0;
+		int  atm_trx_tmn_no         = 0;
+		char napas_proc_id          [ 3 + 1] = {0x00, };
+		char glb_id                 [32 + 1] = {0x00, };
+		char atm_msg_t_id           [ 4 + 1] = {0x00, };
+		char atm_trx_c              [ 6 + 1] = {0x00, };
+		char proc_name              [ 8 + 1] = {0x00, };
+		char atm_pan_ctt            [19 + 1] = {0x00, };
+		int  atm_trx_amt            = 0;
+		char atm_forwd_dttm         [14 + 1] = {0x00, };
+		char atm_acpn_org_rcgn_c    [11 + 1] = {0x00, };
+		char trx_ccy_c              [ 3 + 1] = {0x00, };
+		char atm_ntw_mng_inf_ctt    [ 3 + 1] = {0x00, };
+		char atm_orgtrx_data_ctt    [42 + 1] = {0x00, };
+		char atm_wthd_ac_rcgn_no    [28 + 1] = {0x00, };
+		char atm_rcpt_ac_rcgn_no    [28 + 1] = {0x00, };
+		int  atm_acpn_man_rcgn_c    = 0;
+		int  stmt_amt               = 0;
+		int  claim_amt              = 0;
+		int  stmt_exrt              = 0;
+		int  claim_exrt             = 0;
+		char stmt_ccy_c             [ 3 + 1] = {0x00, };
+		char claim_ccy_c            [ 3 + 1] = {0x00, };
+		char atm_mdm_d              [ 2 + 1] = {0x00, };
+		char otr_srch_refno         [12 + 1] = {0x00, };
+		char otr_respond_c          [ 2 + 1] = {0x00, };
+		int  atm_dspch_org_rcgn_c   = 0;
+		char atm_napas_trx_refno    [16 + 1] = {0x00, };
+		char atm_otrnt_d            [ 2 + 1] = {0x00, };
+		char swc_svr_d              [ 1 + 1] = {0x00, };
+		char nap_data               [ 500+1] = {0x00, };
+		char c_trdat                [4000+1] = {0x00, };
+	EXEC SQL END DECLARE SECTION;
+	LOGGER(LOG_DEBUG, "%d]Start... ", CPid);
+	memcpy(napas_proc_id, "IPS", sizeof(napas_proc_id) - 1);
+	sprintf(c_nap_data, "%.*s", sizeof(c_nap_data), napas_data);
+	rtrimString(c_nap_data);
+	memcpy(nap_data, c_nap_data, sizeof(nap_data) -1 );
+	memcpy(c_trx_brno, ChnlHead.trxbrno, sizeof(c_trx_brno) -1);
+	trx_brno = atoi(c_trx_brno);
+	memcpy(c_atm_trx_tmn_no, ChnlHead.trx_trmno, sizeof(c_atm_trx_tmn_no) -1);
+	atm_trx_tmn_no = atoi(c_atm_trx_tmn_no);
+	memcpy(c_atm_trx_trace_no, MsgData.bit_11, sizeof(c_atm_trx_trace_no) -1);
+	atm_trx_trace_no = atoi(c_atm_trx_trace_no);
+	sprintf(glb_id, "%.*s%.*s", sizeof(MsgHead.glob_id), MsgHead.glob_id, sizeof(MsgHead.step), MsgHead.step);
+	memcpy(atm_msg_t_id, MsgData.msgtype, sizeof(atm_msg_t_id) -1);
+	memcpy(atm_trx_c, MsgData.bit_3, sizeof(atm_trx_c) -1);
+	memcpy(proc_name, ExeName, sizeof(proc_name) -1);
+	memcpy(atm_pan_ctt, MsgData.bit_2, sizeof(atm_pan_ctt) -1);
+	memcpy(c_atm_trx_amt, MsgData.bit_4, sizeof(c_atm_trx_amt) -1);
+	atm_trx_amt = atoi(c_atm_trx_amt);
+	memcpy(atm_forwd_dttm, MsgData.bit_7, sizeof(atm_forwd_dttm) -1);
+	memcpy(atm_acpn_org_rcgn_c, MsgData.bit_32, sizeof(atm_acpn_org_rcgn_c) -1);
+	memcpy(trx_ccy_c, MsgData.bit_49, sizeof(trx_ccy_c) -1);
+	memcpy(atm_ntw_mng_inf_ctt, MsgData.bit_70, sizeof(atm_ntw_mng_inf_ctt) -1);
+	memcpy(atm_orgtrx_data_ctt, MsgData.bit_90, sizeof(atm_orgtrx_data_ctt) -1);
+	memcpy(atm_wthd_ac_rcgn_no, MsgData.bit_102, sizeof(atm_wthd_ac_rcgn_no) -1);
+	memcpy(atm_rcpt_ac_rcgn_no, MsgData.bit_103, sizeof(atm_rcpt_ac_rcgn_no) -1);
+	memcpy(c_atm_acpn_man_rcgn_c, MsgData.bit_100, sizeof(c_atm_acpn_man_rcgn_c) -1);
+	atm_acpn_man_rcgn_c = atoi(c_atm_acpn_man_rcgn_c);
+	memcpy(c_stmt_amt, &MsgData.atm_ord_ctt[910], sizeof(c_stmt_amt) -1);
+	stmt_amt = atoi(c_stmt_amt);
+	memcpy(c_claim_amt, &MsgData.atm_ord_ctt[922], sizeof(c_claim_amt) -1);
+	claim_amt = atoi(c_claim_amt);
+	memcpy(c_stmt_exrt, &MsgData.atm_ord_ctt[934], sizeof(c_stmt_exrt) -1);
+	stmt_exrt = atoi(c_stmt_exrt);
+	memcpy(c_claim_exrt, &MsgData.atm_ord_ctt[942], sizeof(c_claim_exrt) -1);
+	claim_exrt = atoi(c_claim_exrt);
+	memcpy(stmt_ccy_c, &MsgData.atm_ord_ctt[950], sizeof(stmt_ccy_c) -1);
+	memcpy(claim_ccy_c, &MsgData.atm_ord_ctt[953], sizeof(claim_ccy_c) -1);
+	memcpy(atm_mdm_d, MsgData.atm_mdm_d, sizeof(atm_mdm_d) -1);
+	memcpy(otr_srch_refno, MsgData.bit_37, sizeof(otr_srch_refno) -1);
+	memcpy(otr_respond_c, MsgData.bit_39, sizeof(otr_respond_c) -1);
+	memcpy(c_atm_dspch_org_rcgn_c, MsgData.bit_33, sizeof(c_atm_dspch_org_rcgn_c) -1);
+	atm_dspch_org_rcgn_c = atoi(c_atm_dspch_org_rcgn_c);
+	sprintf(atm_napas_trx_refno, "%.*s", sizeof(atm_napas_trx_refno) -1, &MsgData.filler[60]);
+	sprintf(atm_otrnt_d, "%.*s", sizeof(atm_otrnt_d) -1, MsgData.atm_otrnt_d);
+	memcpy(swc_svr_d, ServerGb, sizeof(swc_svr_d) -1);
+	memcpy(c_trdat, sdata, strlen(sdata) );
+	rtrimString(c_trdat);
+
+	EXEC SQL
+		INSERT INTO DBOWN.GAT_SWSNAPRCV_LOG
+		(
+			SH_LCL_CORP_C
+			, TRX_DT
+			, ATM_LGGTM
+			, NAPAS_PROC_ID
+			, NORM_PROC_YN
+			, ATM_TRX_TRACE_NO
+			, GLB_ID
+			, ATM_MSG_T_ID
+			, ATM_TRX_C
+			, PGM_NM_ID
+			, TRX_TMNNO
+			, ATM_PAN_CTT
+			, ATM_TRX_AMT
+			, ATM_FORWD_DTTM
+			, ATM_ACPN_ORG_RCGN_C
+			, TRX_CCY_C
+			, ATM_NTW_MNG_INF_CTT
+			, ATM_ORGTRX_DATA_CTT
+			, ATM_WTHD_AC_RCGN_NO
+			, ATM_RCPT_AC_RCGN_NO
+			, ATM_ACPN_MAN_RCGN_C
+			, STMT_AMT
+			, CLAIM_AMT
+			, STMT_EXRT
+			, CLAIM_EXRT
+			, STMT_CCY_C
+			, CLAIM_CCY_C
+			, ATM_MDM_D
+			, OTR_SRCH_REFNO
+			, OTR_RESPOND_C
+			, ATM_DSPCH_ORG_RCGN_C
+			, ATM_NAPAS_TRX_REFNO
+			, ATM_OTRNT_D
+			, TRX_RQST_TIME
+			, TRX_RESPOND_TIME
+			, BIZ_ERR_C
+			, BIZ_ERR_C_CTT
+			, NAPAS_MSG_DTL_CTT
+			, ATM_MSG_DTL_CTT
+			, INF_REGIS_DT
+			, INF_REGIS_TIME
+			, INF_REGIS_BUSS_DT
+			, INF_REGIS_BNKERNO
+			, INF_LCHG_DT
+			, INF_LCHG_TIME
+			, INF_LAST_CORC_BUSS_DT
+			, INF_LCHG_MAN_BNKERNO
+			, TRX_BRNO
+			, SWC_SVR_D
+		)
+		VALUES
+		(
+			130
+			, TO_CHAR(SYSDATE, 'YYYYMMDD')
+			, TO_CHAR(SYSDATE, 'YYMM') || LPAD(dbown.gat_swsn_rcv_seq_01.nextval,8,0)
+			, :napas_proc_id
+			, 0
+			, :atm_trx_trace_no
+			, :glb_id
+			, :atm_msg_t_id
+			, :atm_trx_c
+			, :proc_name
+			, :atm_trx_tmn_no
+			, :atm_pan_ctt
+			, :atm_trx_amt
+			, :atm_forwd_dttm
+			, :atm_acpn_org_rcgn_c
+			, :trx_ccy_c
+			, :atm_ntw_mng_inf_ctt
+			, :atm_orgtrx_data_ctt
+			, :atm_wthd_ac_rcgn_no
+			, :atm_rcpt_ac_rcgn_no
+			, :atm_acpn_man_rcgn_c
+			, :stmt_amt
+			, :claim_amt
+			, :stmt_exrt
+			, :claim_exrt
+			, :stmt_ccy_c
+			, :claim_ccy_c
+			, :atm_mdm_d
+			, :otr_srch_refno
+			, :otr_respond_c
+			, :atm_dspch_org_rcgn_c
+			, :atm_napas_trx_refno
+			, :atm_otrnt_d
+			, TO_CHAR(SYSDATE, 'HH24MISS')
+			, ''
+			, ''
+			, ''
+			, :nap_data
+			, :c_trdat
+			, TO_CHAR(SYSDATE, 'YYYYMMDD')
+			, TO_CHAR(SYSDATE, 'HH24MISS')
+			, TO_CHAR(SYSDATE, 'YYYYMMDD')
+			, ''
+			, TO_CHAR(SYSDATE, 'YYYYMMDD')
+			, TO_CHAR(SYSDATE, 'HH24MISS')
+			, TO_CHAR(SYSDATE, 'YYYYMMDD')
+			, ''
+			, :trx_brno
+			, :swc_svr_d
+		)
+	;
+	if (SQL_ERROR)
+	{
+	   	LOGGER(LOG_ERROR, "%d] INSERT GAT_SWSNAPRCV_LOG ERROR [%d", CPid, SQLCODE);
+		EXEC SQL ROLLBACK WORK;
+		return ABNORMAL;
+	}
+	EXEC SQL COMMIT WORK;
+	LOGGER(LOG_DEBUG, "%d]End... ", CPid);
+	return NORMAL;
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : insertSWSANYSND()                                               */
+/* SUBJECT  : NAPAS Network Data INSERT                                       */
+/* PARAM    : int gb(in), char* sdata                                         */
+/* RETURN   : NORMAL                                                          */
+/*----------------------------------------------------------------------------*/
+int insertToSWSANYSND(char* sdata, char* gb)
+{
+	char c_trx_brno             [ 4 + 1] = {0x00, };
+	char c_atm_trx_tmn_no       [ 4 + 1] = {0x00, };
+	char c_atm_trx_trace_no     [ 6 + 1] = {0x00, };
+	char c_atm_trx_amt          [12 + 1] = {0x00, };
+	char c_atm_acpn_man_rcgn_c  [11 + 1] = {0x00, };
+	char c_stmt_amt             [12 + 1] = {0x00, };
+	char c_claim_amt            [12 + 1] = {0x00, };
+	char c_stmt_exrt            [ 8 + 1] = {0x00, };
+	char c_claim_exrt           [ 8 + 1] = {0x00, };
+	char c_atm_dspch_org_rcgn_c [11 + 1] = {0x00, };
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		int  trx_brno               = 0;
+		int  atm_trx_tmn_no         = 0;
+		char atm_proc_tmn_d         [ 1 + 1] = {0x00, };
+		int  atm_trx_trace_no       = 0;
+		char glb_id                 [32 + 1] = {0x00, };
+		char atm_msg_t_id           [ 4 + 1] = {0x00, };
+		char atm_trx_c              [ 6 + 1] = {0x00, };
+		char proc_name              [ 8 + 1] = {0x00, };
+		char atm_pan_ctt            [19 + 1] = {0x00, };
+		int  atm_trx_amt            = 0;
+		char atm_forwd_dttm         [14 + 1] = {0x00, };
+		char atm_acpn_org_rcgn_c    [11 + 1] = {0x00, };
+		char trx_ccy_c              [ 3 + 1] = {0x00, };
+		char atm_ntw_mng_inf_ctt    [ 3 + 1] = {0x00, };
+		char atm_orgtrx_data_ctt    [42 + 1] = {0x00, };
+		char atm_wthd_ac_rcgn_no    [28 + 1] = {0x00, };
+		char atm_rcpt_ac_rcgn_no    [28 + 1] = {0x00, };
+		int  atm_acpn_man_rcgn_c    = 0;
+		int  stmt_amt               = 0;
+		int  claim_amt              = 0;
+		int  stmt_exrt              = 0;
+		int  claim_exrt             = 0;
+		char stmt_ccy_c             [ 3 + 1] = {0x00, };
+		char claim_ccy_c            [ 3 + 1] = {0x00, };
+		char atm_mdm_d              [ 2 + 1] = {0x00, };
+		char otr_srch_refno         [12 + 1] = {0x00, };
+		char otr_respond_c          [ 2 + 1] = {0x00, };
+		int  atm_dspch_org_rcgn_c   = 0;
+		char atm_napas_trx_refno    [16 + 1] = {0x00, };
+		char atm_otrnt_d            [ 2 + 1] = {0x00, };
+		char swc_svr_d              [ 1 + 1] = {0x00, };
+		char c_trdat                [4000+1] = {0x00, };
+	EXEC SQL END DECLARE SECTION;
+	LOGGER(LOG_DEBUG, "%d]Start... ", CPid);
+	memcpy(c_trx_brno, ChnlHead.trxbrno, sizeof(c_trx_brno) -1);
+	trx_brno = atoi(c_trx_brno);
+	memcpy(c_atm_trx_tmn_no, ChnlHead.trx_trmno, sizeof(c_atm_trx_tmn_no) -1);
+	atm_trx_tmn_no = atoi(c_atm_trx_tmn_no);
+	memcpy(atm_proc_tmn_d, gb, sizeof(atm_proc_tmn_d) -1);
+	memcpy(c_atm_trx_trace_no, MsgData.bit_11, sizeof(c_atm_trx_trace_no) -1);
+	atm_trx_trace_no = atoi(c_atm_trx_trace_no);
+	sprintf(glb_id, "%.*s%.*s", sizeof(MsgHead.glob_id), MsgHead.glob_id, sizeof(MsgHead.step), MsgHead.step);
+	memcpy(atm_msg_t_id, MsgData.msgtype, sizeof(atm_msg_t_id) -1);
+	memcpy(atm_trx_c, MsgData.bit_3, sizeof(atm_trx_c) -1);
+	memcpy(proc_name, SuPname, sizeof(proc_name) -1);
+	memcpy(atm_pan_ctt, MsgData.bit_2, sizeof(atm_pan_ctt) -1);
+	memcpy(c_atm_trx_amt, MsgData.bit_4, sizeof(c_atm_trx_amt) -1);
+	atm_trx_amt = atoi(c_atm_trx_amt);
+	memcpy(atm_forwd_dttm, MsgData.bit_7, sizeof(atm_forwd_dttm) -1);
+	memcpy(atm_acpn_org_rcgn_c, MsgData.bit_32, sizeof(atm_acpn_org_rcgn_c) -1);
+	memcpy(trx_ccy_c, MsgData.bit_49, sizeof(trx_ccy_c) -1);
+	memcpy(atm_ntw_mng_inf_ctt, MsgData.bit_70, sizeof(atm_ntw_mng_inf_ctt) -1);
+	memcpy(atm_orgtrx_data_ctt, MsgData.bit_90, sizeof(atm_orgtrx_data_ctt) -1);
+	memcpy(atm_wthd_ac_rcgn_no, MsgData.bit_102, sizeof(atm_wthd_ac_rcgn_no) -1);
+	memcpy(atm_rcpt_ac_rcgn_no, MsgData.bit_103, sizeof(atm_rcpt_ac_rcgn_no) -1);
+	memcpy(c_atm_acpn_man_rcgn_c, MsgData.bit_100, sizeof(c_atm_acpn_man_rcgn_c) -1);
+	atm_acpn_man_rcgn_c = atoi(c_atm_acpn_man_rcgn_c);
+	memcpy(c_stmt_amt, &MsgData.atm_ord_ctt[910], sizeof(c_stmt_amt) -1);
+	stmt_amt = atoi(c_stmt_amt);
+	memcpy(c_claim_amt, &MsgData.atm_ord_ctt[922], sizeof(c_claim_amt) -1);
+	claim_amt = atoi(c_claim_amt);
+	memcpy(c_stmt_exrt, &MsgData.atm_ord_ctt[934], sizeof(c_stmt_exrt) -1);
+	stmt_exrt = atoi(c_stmt_exrt);
+	memcpy(c_claim_exrt, &MsgData.atm_ord_ctt[942], sizeof(c_claim_exrt) -1);
+	claim_exrt = atoi(c_claim_exrt);
+	memcpy(stmt_ccy_c, &MsgData.atm_ord_ctt[950], sizeof(stmt_ccy_c) -1);
+	memcpy(claim_ccy_c, &MsgData.atm_ord_ctt[953], sizeof(claim_ccy_c) -1);
+	memcpy(atm_mdm_d, MsgData.atm_mdm_d, sizeof(atm_mdm_d) -1);
+	memcpy(otr_srch_refno, MsgData.bit_37, sizeof(otr_srch_refno) -1);
+	memcpy(otr_respond_c, MsgData.bit_39, sizeof(otr_respond_c) -1);
+	memcpy(c_atm_dspch_org_rcgn_c, MsgData.bit_33, sizeof(c_atm_dspch_org_rcgn_c) -1);
+	atm_dspch_org_rcgn_c = atoi(c_atm_dspch_org_rcgn_c);
+	memcpy(atm_napas_trx_refno, &MsgData.filler[60], sizeof(atm_napas_trx_refno) -1);
+	memcpy(atm_otrnt_d, MsgData.atm_otrnt_d, sizeof(atm_otrnt_d) -1);
+	memcpy(swc_svr_d, ServerGb, sizeof(swc_svr_d) -1);
+
+	memcpy(c_trdat, sdata, strlen(sdata) );
+	rtrimString(c_trdat);
+
+	EXEC SQL
+	INSERT INTO DBOWN.GAT_SWSANYSND_LOG
+	(
+		SH_LCL_CORP_C
+		, TRX_DT
+		, ATM_LGGTM
+		, ATM_PROC_TMN_D
+		, NORM_PROC_YN
+		, ATM_TRX_TRACE_NO
+		, GLB_ID
+		, ATM_MSG_T_ID
+		, ATM_TRX_C
+		, PGM_NM_ID
+		, TRX_TMNNO
+		, ATM_PAN_CTT
+		, ATM_TRX_AMT
+		, ATM_FORWD_DTTM
+		, ATM_ACPN_ORG_RCGN_C
+		, TRX_CCY_C
+		, ATM_NTW_MNG_INF_CTT
+		, ATM_ORGTRX_DATA_CTT
+		, ATM_WTHD_AC_RCGN_NO
+		, ATM_RCPT_AC_RCGN_NO
+		, ATM_ACPN_MAN_RCGN_C
+		, STMT_AMT
+		, CLAIM_AMT
+		, STMT_EXRT
+		, CLAIM_EXRT
+		, STMT_CCY_C
+		, CLAIM_CCY_C
+		, ATM_MDM_D
+		, OTR_SRCH_REFNO
+		, OTR_RESPOND_C
+		, ATM_DSPCH_ORG_RCGN_C
+		, ATM_NAPAS_TRX_REFNO
+		, ATM_OTRNT_D
+		, TRX_RQST_TIME
+		, TRX_RESPOND_TIME
+		, BIZ_ERR_C
+		, BIZ_ERR_C_CTT
+		, ATM_MSG_DTL_CTT
+		, INF_REGIS_DT
+		, INF_REGIS_TIME
+		, INF_REGIS_BUSS_DT
+		, INF_REGIS_BNKERNO
+		, INF_LCHG_DT   
+		, INF_LCHG_TIME
+		, INF_LAST_CORC_BUSS_DT
+		, INF_LCHG_MAN_BNKERNO
+		, TRX_BRNO
+		, SWC_SVR_D
+	)
+	VALUES
+	(
+		130
+		, TO_CHAR(SYSDATE, 'YYYYMMDD')
+		, TO_CHAR(SYSDATE, 'YYMM') || LPAD(dbown.gat_swsanysnd_seq_01.nextval,8,0)
+		, :atm_proc_tmn_d
+		, 0
+		, :atm_trx_trace_no
+		, :glb_id
+		, :atm_msg_t_id
+		, :atm_trx_c
+		, :proc_name
+		, :atm_trx_tmn_no
+		, :atm_pan_ctt
+		, :atm_trx_amt
+		, :atm_forwd_dttm
+		, :atm_acpn_org_rcgn_c
+		, :trx_ccy_c
+		, :atm_ntw_mng_inf_ctt
+		, :atm_orgtrx_data_ctt
+		, :atm_wthd_ac_rcgn_no
+		, :atm_rcpt_ac_rcgn_no
+		, :atm_acpn_man_rcgn_c
+		, :stmt_amt
+		, :claim_amt
+		, :stmt_exrt
+		, :claim_exrt
+		, :stmt_ccy_c
+		, :claim_ccy_c
+		, :atm_mdm_d
+		, :otr_srch_refno
+		, :otr_respond_c
+		, :atm_dspch_org_rcgn_c
+		, :atm_napas_trx_refno
+		, :atm_otrnt_d
+		, TO_CHAR(SYSDATE, 'HH24MISS')
+		, ''
+		, ''
+		, ''
+		, :c_trdat
+		, TO_CHAR(SYSDATE, 'YYYYMMDD')
+		, TO_CHAR(SYSDATE, 'HH24MISS')
+		, TO_CHAR(SYSDATE, 'YYYYMMDD')
+		, ''
+		, TO_CHAR(SYSDATE, 'YYYYMMDD')
+		, TO_CHAR(SYSDATE, 'HH24MISS')
+		,  TO_CHAR(SYSDATE, 'YYYYMMDD')
+		, ''
+		, :trx_brno
+		, :swc_svr_d
+	)
+	;
+
+	if (SQL_ERROR)
+	{
+		LOGGER(LOG_ERROR, "%d] INSERT GAT_SWSANYSND_LOG ERROR [%d", CPid, SQLCODE);
+		EXEC SQL ROLLBACK WORK;
+		return ABNORMAL;
+	}
+	EXEC SQL COMMIT WORK;
+	LOGGER(LOG_DEBUG, "%d]End... ", CPid);
+	return NORMAL;
+}
+
+void initCoreStructure(unsigned char x){
+	memset(&ChnlHead, x, sizeof(ChnlHead));      
+	memset(&MsgHead , x, sizeof(MsgHead ));  
+	memset(&MsgFix  , x, sizeof(MsgFix  ));  
+	memset(&MsgCom  , x, sizeof(MsgCom  ));  
+	memset(&MsgData , x, sizeof(MsgData )); 
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : alarm_handler                                                   */
+/* SUBJECT  :                                                                 */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int alarm_handler()
+{
+	LOGGER(LOG_ERROR, "%d] called !!", CPid);
+	signal(SIGALRM, alarm_handler);
+	return NORMAL;
+}
+
+
+int check_running(const char *exeName){
+
+	if(lock_fd >= 0) return 1;
+    
+	char lock_flg[100] = {0x00,};
+	snprintf(lock_flg, sizeof(lock_flg), "/home/atmadm/.config/%s.lock", exeName);
+	lock_fd = open(lock_flg,  O_RDWR | O_CREAT, 0666);
+	if(lock_fd < 0) return 0;
+
+	struct flock fl;
+	memset(&fl, 0, sizeof(fl));
+	fl.l_type = F_WRLCK;
+	fl.l_whence = SEEK_SET;
+
+	if(fcntl(lock_fd, F_SETLK, &fl) < 0){
+		if(errno == EACCES || errno == EAGAIN) return -1; // another intance is running
+		close(lock_fd);
+		lock_fd = -1;
+		return 0;
+	}
+	//write current PID to file
+	ftruncate(lock_fd, 0);
+	char buff[32];
+	snprintf(buff, sizeof(buff), "%d
+", getpid());
+	write(lock_fd, buff, strlen(buff));
+	return 1;
+}
+
+/*----------------------------------------------------------------------------*/
+/*                            END  OF  PROGRAM                                */
+/*----------------------------------------------------------------------------*/

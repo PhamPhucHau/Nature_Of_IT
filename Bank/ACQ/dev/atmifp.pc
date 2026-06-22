@@ -1,0 +1,1316 @@
+/*----------------------------------------------------------------------------*/
+/* PROGRAM NM : atmifd.pc                                                     */
+/* PROCESS NM : atmifd                                                        */
+/* SUBJECT    : ATM CLIENT CONNECT RECEIVE PROGRAM                            */
+/* Programmer : ChangKoo Lee                                                  */
+/* Target User: SHINHAN BANK VIETNAM                                          */
+/* Description: Copyright (C) 2010 NAUTILUS HYOSUNG. Ltd                      */
+/*              All rights Reserved                                           */
+/*----------------------------------------------------------------------------*/
+/* VERSION    DATE         NAME      COMMENT                                  */
+/*----------------------------------------------------------------------------*/
+/* V1.00      2010.01.19   CKLEE     FIRST CODING                             */
+/*----------------------------------------------------------------------------*/
+#define MAINSRC
+#include "defcom.h"   
+#include "atmifcom.h"
+#include "acqifcom.h"
+#include "strinet.h"
+#include <sys/un.h>  
+#include "shm.h"
+#include "dbdefine.h"
+#include "trdef.h"
+#include "hsmManagement.h"   
+
+
+EXEC SQL INCLUDE SQLCA;
+
+struct sockaddr_in cli_addr;   
+int    sockfd, connfd;
+int unixSock, writeUnixSocket;
+int proPermCount = 0;
+int proTempCount = 0;
+char   exeName[10], nowDate[15];
+int	   aa_yn = 0, totProcCount = 0; 
+char   server_gb[1+1] = {0x00, };	
+char   hsm_ip[15+1] = {0x00, };
+char   hsm_port[4+1] = {0x00, };
+char   hsm_svc_cnt[2 + 1] = {0x00,};
+char   g_L4IP1 [20 + 1] = {0x00, };
+char   g_L4IP2 [20 + 1] = {0x00, };
+
+void clean_zombie();
+void stopProc();
+void initSignal();
+int  loadDesKey();
+  
+void stopProcAbrt();
+void stopProcQuit();
+void stopProcStop();
+void stopProcKill();
+void stopProcBus();
+void stopProcSegv();
+void stopProcSys();
+void stopProcTerm();
+
+
+#define PROC_ADD_POSCOUNT	(10)
+
+
+int initProcInfo(); // 2013.10.01
+int isAliveProcess(pid_t pid);
+int pickUpIdleProc(char *pstat, int *procIdx, char *pdowndt, int *shmid);
+int InitChildProc();
+int delegateChildProc(char *pstat, int procIdx, int shmid, char *execmd);
+
+int initUnixSocket();
+
+int send_fd();
+
+/*----------------------------------------------------------------------------*/
+/* Program starting info													  */
+/*----------------------------------------------------------------------------*/
+/* void usage(char* filenm)
+{
+	printf("
+");
+	printf("usage : 
+");
+	printf(" %s A/B & (startup server process)
+", filenm);
+	printf("
+");
+} */
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : main()                                                     */
+/* Description   :                                                            */
+/*----------------------------------------------------------------------------*/
+main(int argc, char** argv)
+{
+	int    ret, clilen, pid, status, procIdx,shmid, socketReadyYn, cnt, socketNotReadyCnt;
+	fd_set rset;
+	char   pname[11], strix[3];
+	char   logfile[128], args1[8], userip[16];
+	char   logdir[128], sdate[16];
+	char   tmp[100];
+	char   userip2[16];
+	char   passwd[20 + 1] = {0x00, }; 
+	char   tmp_path[50 + 1] = {0x00, }; 
+	char   run_path[50 + 1] = {0x00, }; 
+	char   run_proc[60 + 1] = {0x00, }; 
+	char   pstat[1 +1] = {0x00,};
+	char   pdowndt[14 +1] = {0x00,};
+	struct timeval tval;
+	FILE* p_fp = NULL;
+	FILE* h_fp = NULL;
+	
+	if (argc == 1)
+	{
+		aa_yn = 0;
+		memcpy(server_gb, "Z", sizeof(server_gb) -1);
+	}
+	else
+	{  
+		aa_yn = 1;
+		memcpy(server_gb, argv[1], sizeof(server_gb) -1);
+	}
+	
+	// if(argc == 3){
+	// 	memcpy(hsm_svc_cnt, argv[2], sizeof(hsm_svc_cnt) -1);
+	// }
+	  
+	sprintf(exeName, "%s", argv[0]);
+	initLogging();
+
+	getL4IP();
+	sprintf(pname, "%-10s", argv[0]);
+
+	logging(logfp, "%s] exeName : server_gb [%s : %s : %s", __func__, exeName, server_gb, hsm_svc_cnt);
+
+	if (setMainRun(pname) == ABNORMAL)
+	{
+		logging(logfp,"%s] setMainRun() : ERROR : pname(%s)", __func__, pname);
+		stopProc();
+	}
+
+	initSignal();
+	
+	
+	h_fp = popen("pwd", "r"); 
+	fgets(tmp_path, sizeof(tmp_path) -1, h_fp);
+	pclose(h_fp);
+
+	memcpy(run_path, tmp_path, strlen(tmp_path) -1 );
+
+	rtrimString(run_path);
+	logging(logfp, "%s] run_path : [%s", __func__, run_path);
+
+	int ii = 1;
+
+	if (ora_db_connect("atmdba") == 0)
+		logging(logfp, "%s] DB Connect SUCCESS ", __func__);
+	else
+	{
+		logging(logfp, "%s] DB Connect ERROR ", __func__);
+		
+		for(ii; ii < 101; ii++)
+		{
+			if (ora_db_connect("atmdba") == 0)
+			{
+				logging(logfp, "%s] DB Connect SUCCESS ", __func__);
+
+				break;
+			}	
+
+			logging(logfp, "%s] DB Reconnect ERROR [%d", __func__, ii);
+
+			sleep(1);
+		}
+	}
+
+	if (ii == 101)
+		stopProc();
+
+	sockfd = -1;
+	connfd = -1;
+
+	if ((sockfd = initServerSocket(ACQ_PORT)) == ABNORMAL)
+	{
+		logging(logfp, "%s][EROR]initServerSocket(%d) Error!",__func__,  ACQ_PORT);
+		stopProc();
+	}
+
+	if(initUnixSocket()== ABNORMAL){
+		logging(logfp, "%s][EROR]initUnixSocket Error!",__func__);
+		stopProc();
+	}
+
+	if (loadDesKey() == ABNORMAL)
+    {
+		logging(logfp, "DBUG][EROR] loadDesKey() Error![dpdeskey.conf] Check!");
+
+        stopProc();
+    }
+
+	getLogLevel();
+
+	if (loadConfig() == ABNORMAL)
+    {
+		logging(logfp, "DBUG][EROR] loadConfig() Error![dpdeskey.conf] Check!");
+
+        stopProc();
+    }
+
+	
+	EXEC SQL BEGIN DECLARE SECTION;
+	 	int permCount = 0;
+		int tempCount = 0;
+	EXEC SQL END DECLARE SECTION;
+
+	EXEC SQL
+	SELECT 
+		TO_NUMBER(MAX(ATM_ESTBLS_NM)),
+		TO_NUMBER(MAX(ATM_ESTBLS_CTT))
+	  	INTO 	
+		  	:permCount,
+	  		:tempCount
+	FROM ( 
+		SELECT 	( CASE when ATM_ESTBLS_ID = 'PROC_CNT_PER' THEN ATM_ESTBLS_NM ELSE '' end ) AS ATM_ESTBLS_NM,
+				( CASE when ATM_ESTBLS_ID = 'PROC_CNT_TMP' THEN ATM_ESTBLS_NM ELSE '' end ) AS ATM_ESTBLS_CTT
+		FROM DBOWN.GAT_SWSCONF_INF
+		WHERE 
+			SH_LCL_CORP_C = 130
+			AND ATM_ESTBLS_TRX_C = 'ACQCONF'
+			AND SUBSTR(ATM_ESTBLS_ID,1,8) = 'PROC_CNT')
+	;
+
+	if (sqlca.sqlcode != SQL_OK) 
+	{
+		if (SQL_NOTFOUND)
+		{
+			LOGGER(LOG_ERROR,  " nPOSCount is ZERO!", "");
+		}
+
+		LOGGER(LOG_ERROR,  " get POS total count Error ORA[%ld]!", sqlca.sqlcode);
+		
+		stopProc();
+	}
+	
+	proPermCount = permCount;
+	proTempCount = 15; // THAI tempCount;
+	LOGGER(LOG_INFO,  " POS Permanance Proc:[%d], Maximum POS Temporary Proc:[%d]", proPermCount, proTempCount);
+	totProcCount = proPermCount + proTempCount;
+
+	if (initProcInfo() == ABNORMAL) 
+	{
+		LOGGER(LOG_ERROR,  "initProcInfo() Get ERROR!", "");
+		stopProc();
+	}
+	
+	if( InitChildProc() == ABNORMAL) 
+	{
+		LOGGER(LOG_ERROR,  "InitChildProc() Get ERROR!", "");
+		stopProc();
+	}
+	clilen = sizeof(cli_addr);
+	tval.tv_sec  = 2;
+	tval.tv_usec = 0;
+	for( ; ; )
+	{
+		checkDate();
+
+		
+		memset(pstat,0x00,sizeof(pstat));
+		procIdx = -1;
+		shmid = -1;
+		socketReadyYn = -1;
+		// while((pid = waitpid(-1, &status, WNOHANG)) > 0)
+		// {
+		// 	logging(logfp, "%s]CLEAR ZOMBIE PROCESS[%d]", __func__,pid);
+		// }    
+   
+		FD_ZERO(&rset);   
+		FD_SET(sockfd , &rset);   
+		ret = select(sockfd+1 , &rset , (fd_set *)NULL , (fd_set *)NULL , &tval);
+		if ( (ret > 0) && (FD_ISSET(sockfd, &rset)) ) {
+			socketNotReadyCnt = 0;
+			LOGGER(LOG_DEBUG,  "select-Socket are ready", "");
+		} else {
+			if ( ++socketNotReadyCnt >= 6000 ) { // 6000*0.01s
+				socketNotReadyCnt = 0;
+				LOGGER(LOG_DEBUG,  "select-Socket not ready[%d][%d", ret , errno);
+			}
+			usleep(10000);
+			continue;
+		}
+
+		if( pickUpIdleProc(&pstat,&procIdx,&pdowndt,&shmid) == ABNORMAL || procIdx == -1){
+			LOGGER(LOG_DEBUG,  "Available Process Picking Fail procIdx[%ld", procIdx);
+			usleep(10000);
+			continue;  
+		}
+		LOGGER(LOG_DEBUG,  "Picked  procIdx[%ld]pstat[%s", procIdx, pstat);
+
+		connfd = accept(sockfd,(struct sockaddr *)&cli_addr,(int*)&clilen);
+		LOGGER(LOG_DEBUG,  "CULICHUA connfd[%d",connfd);
+		if (connfd < 0) continue;
+		      
+		memset(userip, 0x00, sizeof(userip));  
+
+		sprintf(tmp   , "%s/%s", run_path, ACQ_PROC_NAME );
+		sprintf(args1 , "%d",    connfd                             ); 
+		sprintf(userip, "%s",    inet_ntoa(cli_addr.sin_addr)       );
+
+		if (memcmp(userip, g_L4IP1, strlen(userip)) == 0 ||
+			memcmp(userip, g_L4IP2, strlen(userip)) == 0)
+		{
+			LOGGER(LOG_INFO,  "Income Msg[%d] Is from L4IP[%s", connfd, userip);
+			shutdown(connfd,   SHUT_RDWR);
+			close(connfd);
+			connfd = -1;
+			usleep(10000);
+			continue;
+		}   
+		
+		if( IsAvaibleToRead(connfd) != 1){
+			shutdown(connfd,   SHUT_RDWR);
+			close(connfd);  
+			connfd = -1;
+			continue;
+		}
+		checkDate();  
+
+		if((ret = delegateChildProc(pstat, procIdx, shmid, tmp)) == ABNORMAL){
+			LOGGER(LOG_ERROR,  "delegateChildProc() ERROR![%s:%ld",tmp, procIdx);
+
+			shutdown(connfd,   SHUT_RDWR);
+			close(connfd);
+			connfd = -1;
+
+			usleep(30000);
+			continue;
+		}
+		close(connfd);
+		connfd = -1;
+		LOGGER(LOG_DEBUG,  "delegateChildProc OK = ret [%d", procIdx);
+		usleep(10000);
+
+		cnt++;
+
+		if (cnt == 1200) { // 2min
+			/* add kbh. 20170711... get LOG_LEVEL   */
+			LOGGER(LOG_DEBUG,  "Log Level Get [%d", custLoglevel);  
+			getLogLevel();
+			cnt = 0;
+		}
+
+	}
+
+	stopProc(); 
+}
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : initSignal()                                               */
+/* Description   : System Signal Initial Processing                           */
+/*----------------------------------------------------------------------------*/
+void initSignal()
+{
+	signal(SIGHUP,    SIG_IGN    ); /* Hangup (01)                            */
+	signal(SIGINT,    SIG_IGN    ); /* Interrupt (02)                         */
+	signal(SIGILL ,   SIG_IGN    ); /* Illegal instruction (04)               */
+	signal(SIGTRAP,   SIG_IGN    ); /* Trace trap (05)                        */
+	signal(SIGFPE ,   SIG_IGN    ); /* Floating point exception (08)          */
+	signal(SIGALRM,   SIG_IGN    ); /* Alarm Clock (14)                       */
+	signal(SIGUSR1,   SIG_IGN    ); /* User Signal 1 (16) : Process down      */
+	signal(SIGUSR2,   SIG_IGN    ); /* User Signal 2 (17) : reserved          */
+	signal(SIGIO  ,   SIG_IGN    ); /* asynchronous I/O (22)                  */
+	signal(SIGTSTP,   SIG_IGN    ); /* Interactive stop signal (25)           */
+	signal(SIGCONT,   SIG_IGN    ); /* Continue if stopped (26)               */
+	signal(SIGTTIN,   SIG_IGN    ); /* Read from control terminal (27)        */
+	signal(SIGTTOU,   SIG_IGN    ); /* Write to control terminal (28)         */
+	signal(SIGURG ,   SIG_IGN    ); /* urgent condition on IO channel (29)    */
+	signal(SIGPIPE,   SIG_IGN    ); /* Pipe error (13) 종료된 소켓에 쓰는경우 */
+	signal(SIGABRT,   stopProcAbrt   ); /* Process abort (06)                 */
+	signal(SIGQUIT,   stopProcQuit   );
+	signal(SIGSTOP,   stopProcStop   ); /* Stop signal (24)                   */
+	signal(SIGKILL,   stopProcKill   ); /* 프로세스 종료 시그널               */
+	signal(SIGBUS ,   stopProcBus    ); /* Bus error (10)                     */
+	signal(SIGSEGV,   stopProcSegv   ); /* Segmentation Violation (11)        */
+	signal(SIGSYS ,   stopProcSys    ); /* Bad argument to system call (12)   */
+	signal(SIGTERM,   stopProcTerm   ); /* SW termination signal from kill (15)   */
+	signal(SIGCHLD,  clean_zombie); /* Child proc. terminated or stopped(18)  */
+	// sighold(SIGCHLD);
+}
+   
+void stopProcAbrt()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcAbrt", __LINE__);
+	stopProc();
+}
+
+void stopProcQuit()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcQuit", __LINE__);
+	stopProc();
+}    
+
+void stopProcStop()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcStop", __LINE__);
+	stopProc();
+}
+
+void stopProcKill()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcKill", __LINE__);
+	stopProc();
+}
+
+void stopProcBus()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcBus", __LINE__);
+	stopProc();
+}
+
+void stopProcSegv()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcSegv", __LINE__);
+	stopProc();
+}
+
+void stopProcSys()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcSys", __LINE__);
+	stopProc();
+}
+
+void stopProcTerm()
+{
+	LOGGER(LOG_INFO,  "[%s:%d]:", "stopProcTerm", __LINE__);
+	stopProc();
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : setMainRun                                                      */
+/* SUBJECT  : Main Process Running Setting                                    */
+/* ARGUMENT : pidname                                                         */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int setMainRun(char* pidname)
+{
+	int  shmid;
+	char tdate[21];
+	s_daemoninfo *shmaddr;
+
+	if ((shmid = accessShm(SHMKEY_ACQMAIN)) < 0)
+	{
+		shmid = createShm(SHMKEY_ACQMAIN, sizeof(s_daemoninfo));
+		if (shmid == ABNORMAL) return ABNORMAL;
+	}
+
+	shmaddr = (s_daemoninfo *)atShm(shmid, 0);
+	if (shmaddr == (s_daemoninfo *)NULL) return ABNORMAL;
+
+	memset(&pDmonInfo, 0x20, sizeof(pDmonInfo));
+	if ( (memcmp(shmaddr->pidname, pidname, sizeof(shmaddr->pidname)) == 0 ) &&
+		 (memcmp(shmaddr->pstat, "R", 1) == 0 ) )
+	{
+		memcpy(&pDmonInfo, shmaddr, sizeof(pDmonInfo));
+		printf("
+Process[%s] is Alreay Running....
+", pidname);
+		detShm(shmaddr);
+		return ABNORMAL;
+	}
+
+	memcpy(pDmonInfo.pidname, pidname, sizeof(pDmonInfo.pidname));
+	memcpy(pDmonInfo.pstat  , "R"    , sizeof(pDmonInfo.pstat)  );
+	memset(tdate, 0x00, sizeof(tdate));
+	getDate(tdate);
+	memcpy(pDmonInfo.startdt, tdate  , sizeof(pDmonInfo.startdt));
+	memset(pDmonInfo.downdt , 0x20   , sizeof(pDmonInfo.downdt) );
+	memcpy(pDmonInfo.desc   , "POS SERVER PROCESS  ", sizeof(pDmonInfo.desc));
+	memcpy(shmaddr          , &pDmonInfo, sizeof(pDmonInfo));
+
+	detShm(shmaddr);
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : setMainDown                                                     */
+/* SUBJECT  : Main Process Downing Setting                                    */
+/* ARGUMENT : pidname                                                         */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int setMainDown()
+{
+	int  shmid;
+	char tdate[21];
+	s_daemoninfo *shmaddr;
+
+	if ((shmid = accessShm(SHMKEY_ACQMAIN)) < 0)
+	{
+		shmid = createShm(SHMKEY_ACQMAIN, sizeof(s_daemoninfo));
+		if (shmid == ABNORMAL) return ABNORMAL;
+	}
+
+	shmaddr = (s_daemoninfo *)atShm(shmid, 0);
+	if (shmaddr == (s_daemoninfo *)NULL) return ABNORMAL;
+
+	memset(&pDmonInfo, 0x20, sizeof(pDmonInfo));
+	memcpy(pDmonInfo.pidname, shmaddr->pidname, sizeof(pDmonInfo.pidname));
+	memcpy(pDmonInfo.pstat  , "D"             , sizeof(pDmonInfo.pstat)  );
+	memcpy(pDmonInfo.startdt, shmaddr->startdt, sizeof(pDmonInfo.startdt));
+
+	memset(tdate, 0x00, sizeof(tdate));
+	getDate(tdate);
+
+	memcpy(pDmonInfo.downdt , tdate           , sizeof(pDmonInfo.downdt) );
+	memcpy(pDmonInfo.desc   , "POS SERVER PROCESS  ", sizeof(pDmonInfo.desc));
+	memcpy(shmaddr          , &pDmonInfo, sizeof(pDmonInfo));
+
+	detShm(shmaddr);
+
+    return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : initProcInfo                                                    */
+/* SUBJECT  : Process Information Initial                                     */
+/* ARGUMENT :                                                                 */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int initProcInfo() // 2013.10.01
+{
+	int shmsz, shmid;
+	s_newprocinfo *shmaddr;
+
+	shmsz = sizeof(s_newprocinfo) * totProcCount;
+	shmid = createShm(SHMKEY_ACQIF, shmsz);
+	if (shmid == ABNORMAL)
+	{
+		LOGGER(LOG_ERROR,  "createShm():SHARED MEMORY CREATE FAILURE!(SHMKEY_ACQIF) totProcCount[%d]", totProcCount);
+		return ABNORMAL;
+	}
+
+	LOGGER(LOG_DEBUG,  "createShm():SHARED MEMORY CREATE SUCCESS!(SHMKEY_ACQIF) totProcCount[%d] shmid[%d]", totProcCount, shmid);
+
+	pid_t pgid = getpid();
+	if(setpgid(0, pgid) < 0){
+		LOGGER(LOG_ERROR,  "Fail to set parent process group [%s]", pgid);
+		return ABNORMAL;
+	}
+
+	return NORMAL;
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : stopProc()                                                 */
+/* Description   : Main Process Stop and Socket Close and Program Exit        */
+/*----------------------------------------------------------------------------*/
+void stopProc()
+{
+	LOGGER(LOG_INFO,  ">>>>>> PROCESS SHUTDOWN START............[OK]","");
+	if (setMainDown() == ABNORMAL)
+		LOGGER(LOG_INFO,  "setMainDown() : ERROR","");
+
+	if (sockfd >= 0)
+	{
+		shutdown(sockfd,   SHUT_RDWR);
+		close(sockfd);
+		sockfd = -1;
+	}
+
+	if(unixSock >=0){
+		shutdown(unixSock,   SHUT_RDWR);
+		close(unixSock);
+		unixSock = -1;
+	}
+
+	if(writeUnixSocket >=0){
+		shutdown(writeUnixSocket,   SHUT_RDWR);
+		close(writeUnixSocket);
+		writeUnixSocket = -1;
+	}
+	// DB Disconnect
+	EXEC SQL ROLLBACK WORK RELEASE;
+	LOGGER(LOG_INFO,  " DB Disconnected .. ", "");
+
+	if (connfd >= 0)
+	{
+		shutdown(connfd,   SHUT_RDWR);
+		close(connfd);
+		connfd = -1;  
+	}
+	pid_t pgid = getpid();
+	if(killpg(pgid, SIGTERM) < 0 ){
+		LOGGER(LOG_INFO,  "Fail to kill process group[%d]",pgid);
+	}else{
+		while(wait(NULL) > 0);
+	}
+
+	if (logfp != (FILE *)NULL)
+	{
+		LOGGER(LOG_INFO,  ">>>>>> PROCESS SHUTDOWN COMPLETE............[OK]","");
+		LOGGER(LOG_INFO,  ">>>>>> PROCESS SHUTDOWN COMPLETE............[OK]","");
+		LOGGER(LOG_INFO,  "............[[ END OF DEBUGGING ]]................","");
+		LOGGER(LOG_INFO,  "............[[ END OF LOGGING ]]................","");
+		fclose(logfp);
+	}
+
+	exit(0);
+}
+   
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : clean_zombie                                                    */
+/* SYNTAX   : void clean_zombie(int signo)                                    */
+/* ARGUMENT :                                                                 */
+/* RETURN   :                                                                 */
+/* PURPOSE  : 종료된 CHILD PROCESS를 검사한다.                                */
+/*----------------------------------------------------------------------------*/
+void clean_zombie(int signo)
+{
+	int status, xpid;
+	register int ii;
+
+	xpid = waitpid(-1, &status, WNOHANG);
+	signal(SIGCHLD, clean_zombie);
+	sighold(SIGCHLD);
+}
+
+/*----------------------------------------------------------------------------*/
+/* Function Name : initLogging                                                */
+/* Description   : Log & Debug File Create                                    */
+/*----------------------------------------------------------------------------*/
+int initLogging()
+{
+	char logpath[80];
+
+	memset(nowDate , 0x00, sizeof(nowDate));
+	if (getDate(nowDate) == ABNORMAL) stopProc();
+
+	/*-------------------------------------------------------------------*/
+	/* 프로그램 Log File 생성                                            */
+	/*-------------------------------------------------------------------*/
+	if (logfp != (FILE *)NULL) fclose(logfp);
+	logfp = (FILE *)initLogFile(exeName, "a+");
+	if (logfp == (FILE *)NULL)
+	{
+		stopProc();
+	}
+
+	logging(logfp, "DBUG]>>>>>>>>>>>>[[ Debug Starting ]]..................");
+	logging(logfp, "LOGG]>>>>>>>>>>>>[[ Log Starting ]]..................");
+
+	return NORMAL;
+}
+
+/*----------------------------------------------------------------------------*/
+/* date modify check                                                          */
+/*----------------------------------------------------------------------------*/
+int checkDate()
+{
+	char tmp[21] = {0x00, };
+
+	if (getDate(tmp) == NORMAL)
+	{
+		if (memcmp(nowDate, tmp, 8) != 0)
+		{
+			sprintf(nowDate, "%.14s", tmp);
+			initLogging();
+		}
+	}
+
+	return NORMAL;
+}
+
+/*******************************************************************/
+/* get L4IP information from /etc/hosts                            */
+/*******************************************************************/
+int getL4IP()
+{
+    FILE* h_fp;
+    int i = 0;
+    char t_path[100 + 1] = {0x00, };
+    char buff  [100 + 1] = {0x00, };
+    char* l4ip1;
+    char* l4ip2;
+
+    if( (h_fp = fopen(HOSTS_PATH, "r")) == (FILE *)NULL)
+    {
+        LOGGER(LOG_ERROR,  " %s OPEN ERROR", HOSTS_PATH);
+        return ABNORMAL;
+    }
+
+    memset(buff, 0x00, sizeof(buff) -1);
+
+    while(fgets(buff, sizeof(buff) -1, h_fp) != NULL)
+    {
+        if (buff[0] == '#') continue;
+
+        if (strstr(buff, "ATML4-01") != NULL)
+        {
+            // logging(logfp, "%s] buff : [%s", buff);
+
+            l4ip1 = strtok(buff, " ");
+
+            // logging(logfp, "%s] buff after strtok : [%s", __func__, buff);
+            memcpy(g_L4IP1, buff, strlen(buff) );
+
+            // logging(logfp, "%s] g_L4IP1 : [%s", __func__, g_L4IP1);
+        }
+        else if (strstr(buff, "ATML4-02") != NULL)
+        {
+            // logging(logfp, "%s] buff : [%s", __func__, buff);
+
+            l4ip2 = strtok(buff, " ");
+
+            // logging(logfp, "%s] buff : [%s", __func__, buff);
+            memcpy(g_L4IP2, buff, strlen(buff) );
+
+            // logging(logfp, "%s] g_L4IP2 : [%s", __func__, g_L4IP2);
+        }
+
+        memset(buff, 0x00, sizeof(buff) -1);
+    }
+
+    LOGGER(LOG_DEBUG,  " g_L4IP1 : g_L4IP2 [%s:%s", g_L4IP1, g_L4IP2);
+
+    return NORMAL;
+}
+
+
+/*******************************************************************/
+/* Description : Pick a available child process to consume income  */
+/* Strategy : priority 1st - idle process
+                       2nd - down process
+					   3rd - running exceed 2mins                  */
+/*******************************************************************/
+int pickUpIdleProc(char *pstat, int *procIdx, char *pdowndt, int *shmid){
+	(*procIdx) = -1;
+	int tmp_shmid = -1;
+	int ierr, idx;
+	s_newprocinfo *shmaddr;
+	int procIdleIdx = -1,procDwnIdx = -1,procTimeoutIdx = -1;
+
+	if ((tmp_shmid = accessShm(SHMKEY_ACQIF)) < 0)
+	{
+		LOGGER(LOG_ERROR,  "accessShm():SHARED MEMORY ACCESS FAILURE!(SHMKEY_ACQIF)", "");
+		return ABNORMAL;
+	}
+    
+	shmaddr = (s_newprocinfo *)atShm(tmp_shmid, 0);
+	if (shmaddr == (s_newprocinfo *)NULL)
+	{
+		LOGGER(LOG_ERROR,  "atShm():SHARED MEMORY ATTACH FAILURE!(SHMKEY_ACQIF) shmid[%d]", tmp_shmid);
+		return ABNORMAL;
+    }
+	(*shmid) =tmp_shmid;
+
+	for( idx = 0; idx < totProcCount; idx++ ){
+		memcpy(&pNewPrcInfo, &shmaddr[idx], sizeof(pNewPrcInfo));
+		LOGGER(LOG_DEBUG,  "THAI shmaddr[%d][%893.893s].", idx, shmaddr[idx]); // THAI
+		if( memcmp(pNewPrcInfo.pstat, "I", 1) == 0 && procIdleIdx < 0 ){
+			(*procIdx) = idx;
+			memcpy(pstat,pNewPrcInfo.pstat, sizeof(pNewPrcInfo.pstat) );
+			return NORMAL;
+		}
+
+		if( memcmp(pNewPrcInfo.pstat, "D", 1) == 0 && procDwnIdx < 0){
+			procDwnIdx = idx;
+			memcpy(pstat,pNewPrcInfo.pstat, sizeof(pNewPrcInfo.pstat) );
+		}
+
+		if( memcmp(pNewPrcInfo.pstat, "R", 1) == 0 && procTimeoutIdx < 0 ){
+			EXEC SQL BEGIN DECLARE SECTION;
+				char cmpTime [14 + 1] = {0x00, };
+				char curTime [14 + 1] = {0x00, };  
+				int isExpire = 0;
+			EXEC SQL END DECLARE SECTION;
+			memcpy(cmpTime, pNewPrcInfo.pdowndt, sizeof(pNewPrcInfo.pdowndt));
+			getDate(curTime);
+
+			EXEC SQL
+			SELECT CASE WHEN TO_CHAR(TO_DATE(:cmpTime, 'YYYYMMDDHH24MISS') + 1 / 24 / 60 *1, 'YYYYMMDDHH24MISS') <
+					:curTime THEN 1  ELSE 0 END AS OTP_EXPD_YN
+					INTO :isExpire
+			from dual
+			;
+
+			if(isExpire == 1){
+				procTimeoutIdx = idx;
+				memcpy(pstat,pNewPrcInfo.pstat, sizeof(pNewPrcInfo.pstat) );
+				memcpy(pdowndt,pNewPrcInfo.pdowndt, sizeof(pNewPrcInfo.pdowndt) );
+			}
+		}
+
+	}   
+	if(procDwnIdx >=0){
+		(*procIdx) = procDwnIdx;
+	}else if(procTimeoutIdx >=0){
+		(*procIdx) = procTimeoutIdx;
+	}
+	return NORMAL;
+
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : setChildProcInfo                                                */
+/* SUBJECT  : Process Information Set                                         */
+/* ARGUMENT : userip, pname                                                   */
+/* RETURN   : SUCCESS: array index  FAIL : ABNORMAL                           */
+/*----------------------------------------------------------------------------*/
+int initChildProcInfo(int nAtmCount, char * user_id)
+{
+	int  shmid, ix, ierr;
+	int  ipid = 0;
+	char mastkey [40] = {0x00, };
+	s_newprocinfo *shmaddr;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		char branch_code	[ 4 + 1] = {0x00, };	
+		char working_key	[ 8 + 1] = {0x00, };	
+		char process_name	[ 9 + 1] = {0x00, };
+		char procIdx		[2 + 1] = {0x00,};
+	EXEC SQL END DECLARE SECTION;
+
+	if ((shmid = accessShm(SHMKEY_ACQIF)) < 0)
+	{
+		LOGGER(LOG_ERROR,  "accessShm():SHARED MEMORY ACCESS FAILURE!(SHMKEY_ACQIF) procIdx[%d]", nAtmCount);
+		return ABNORMAL;
+	}
+    
+	shmaddr = (s_newprocinfo *)atShm(shmid, 0);
+	if (shmaddr == (s_newprocinfo *)NULL)
+	{
+		LOGGER(LOG_ERROR,  "atShm():SHARED MEMORY ATTACH FAILURE!(SHMKEY_ACQIF) nAtmCount[%d] shmid[%d]", nAtmCount, shmid);
+		return ABNORMAL;
+    }
+
+	memcpy(&pNewPrcInfo, &shmaddr[nAtmCount], sizeof(pNewPrcInfo));
+	sprintf(procIdx , "%0.2d", nAtmCount);
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM INTO :process_name
+	FROM DBOWN.GAT_SWSCONF_INF
+	WHERE SH_LCL_CORP_C = 130
+		AND ATM_ESTBLS_TRX_C = 'ACQ_PROC'
+		AND ATM_ESTBLS_ID = :procIdx
+	;
+	if (SQL_ERROR)
+	{
+		if (SQL_NOTFOUND)
+		{
+			LOGGER(LOG_ERROR,  " DATA NOT FOUND [%d", SQLCODE);
+
+			detShm(shmaddr);
+			return ABNORMAL;
+		}else{
+			LOGGER(LOG_ERROR,  " SELECT SQL ERROR [%d", SQLCODE);
+		}
+		
+		detShm(shmaddr);
+		return ABNORMAL;
+	}
+
+	if ( memcmp(pNewPrcInfo.pstat, "R", 1) == 0 ||memcmp(pNewPrcInfo.pstat, "I", 1) == 0)
+	{
+		LOGGER(LOG_INFO,  "Already Process[%s] Running [%d...", process_name, nAtmCount);
+		int ipid = atoi(pNewPrcInfo.pid);
+		if (kill((pid_t)ipid, SIGTERM) != 0)
+		{
+			if( errno == ESRCH  || errno == EPERM || errno == EINVAL){
+				LOGGER(LOG_INFO,  "kill():PROCESS WAS KILLED process_name[%s] ipid[%d] [%d", process_name, ipid, errno);
+			}else{
+				LOGGER(LOG_ERROR,  "kill():PROCESS KILL FAILURE! process_name[%s] ipid[%d] [%d", process_name, ipid, errno);
+				detShm(shmaddr);
+				return ABNORMAL;
+			}
+		}     
+	}
+	memcpy(pNewPrcInfo.pidname , process_name      , sizeof(pNewPrcInfo.pidname) );
+	memcpy(pNewPrcInfo.pid  , "0" , sizeof(pNewPrcInfo.pid)  );
+	memcpy(pNewPrcInfo.bankcd  , "03" , sizeof(pNewPrcInfo.bankcd)  );
+	memcpy(pNewPrcInfo.branchcd, hsm_port , sizeof(pNewPrcInfo.branchcd));    
+	memcpy(pNewPrcInfo.pstat, "D" , sizeof(pNewPrcInfo.pstat));
+	memcpy(pNewPrcInfo.userid  , user_id , sizeof(pNewPrcInfo.userid)  );  
+	memcpy(pNewPrcInfo.clientip, hsm_ip, sizeof(pNewPrcInfo.clientip));
+	memcpy(pNewPrcInfo.newkey  , AESClearKey , sizeof(pNewPrcInfo.newkey)  );
+	
+	char tmp[50 + 1];
+	memset(tmp, 0x00, sizeof(tmp) );
+	if (strlen(DES_MASTERKEY) > 16)       
+	{
+		memcpy(mastkey, DES_MASTERKEY, strlen(DES_MASTERKEY));
+		pack2(mastkey, pNewPrcInfo.mastkey);
+		sprintf(tmp , "%.8s%.24s", "A7937999", "298983746929286582763521");
+		logging(logfp, "%s] tmp [%s]", __func__, tmp);
+		memcpy(pNewPrcInfo.workkey , tmp, strlen(tmp));
+	}
+	else
+	{
+		memcpy(mastkey, DES_MASTERKEY, strlen(DES_MASTERKEY));
+		pack(mastkey, pNewPrcInfo.mastkey);
+		sprintf(tmp , "%-8.8s", "79379999");
+		logging(logfp, "%s] tmp [%s]", __func__, tmp);
+		memcpy(pNewPrcInfo.workkey , tmp, strlen(tmp));
+    }
+
+	#if 1
+		LOGGER(LOG_INFO,  " pNewPrcInfo.pidname  [%.*s]",  sizeof(pNewPrcInfo.pidname) , pNewPrcInfo.pidname );
+		LOGGER(LOG_INFO,  " pNewPrcInfo.bankcd   [%.*s]",  sizeof(pNewPrcInfo.bankcd)  , pNewPrcInfo.bankcd  );
+		LOGGER(LOG_INFO,  " pNewPrcInfo.pstat    [%.*s]",  sizeof(pNewPrcInfo.pstat),    pNewPrcInfo.pstat);
+		LOGGER(LOG_INFO,  " pNewPrcInfo.userid   [%.*s]",  sizeof(pNewPrcInfo.userid)  , pNewPrcInfo.userid  );
+		LOGGER(LOG_INFO,  " pNewPrcInfo.clientip [%.*s]",  sizeof(pNewPrcInfo.clientip), pNewPrcInfo.clientip);
+		LOGGER(LOG_INFO,  " pNewPrcInfo.workkey  [%.*s]",  sizeof(pNewPrcInfo.workkey) , pNewPrcInfo.workkey );
+	#endif
+
+	memcpy(&shmaddr[nAtmCount], &pNewPrcInfo, sizeof(pNewPrcInfo));
+	LOGGER(LOG_DEBUG,  "THAI shmaddr[%d][%893.893s].", nAtmCount, shmaddr[nAtmCount]); // THAI
+	detShm(shmaddr);
+
+	return nAtmCount;
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* START PERMANENT CHILD PROCESS TO HANDLE CLIENT REQUEST				      */
+/* pstat : I (idle) - tcprvcnt : -1 (No Connection)	- userid : PERM          */
+/* INIT INFORMATION  TEMPORARY CHILD PROCESS TO HANDLE CLIENT REQUEST		  */
+/* pstat : D (down) - tcprvcnt : -1 (No Connection)	- userid : TEMP		  */
+/*----------------------------------------------------------------------------*/
+int InitChildProc(){
+	int pid = 0, ret = 0, idx, status;
+	char userid[10 +1] = {0x00,};
+	for(idx = 0; idx < totProcCount; idx++){
+		memset(userid, 0x00, sizeof(userid) );
+		checkDate();
+
+		while((pid = waitpid(-1, &status, WNOHANG)) > 0)
+		{
+			LOGGER(LOG_INFO,  " CLEAR ZOMBIE PROCESS[%d]", pid);
+		}
+
+		if(idx < proPermCount){
+			memcpy(userid, "PERM", sizeof(userid));
+		}else{
+			memcpy(userid, "TEMP", sizeof(userid));
+		}
+
+		if( initChildProcInfo(idx, userid)  == ABNORMAL )
+		{
+			LOGGER(LOG_ERROR,  " initChildProcInfo(%d,%s) Get ERROR!", idx,userid);
+			return ABNORMAL;
+		}
+
+	}
+
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* DELEGATE TO CHILD PROCESS TO CONSUME CLIENT REQUEST				          */
+/* PARAMETER :  pstat - picked child proc status, connfd - accepted connection*/
+/* DESCRIPTION : pass connfd to running process		  						  */
+/*               start and pass connfd to down process		  				  */
+/*               re-start and pass connfd to down process		  			  */
+/*----------------------------------------------------------------------------*/
+int delegateChildProc(char *pstat, int procIdx, int shmid, char *execmd){
+	s_newprocinfo *shmaddr;
+	int ret, childPid;
+	char s_procIdx[2+1];
+	char s_unixSock[8+1];
+	memset(s_procIdx, 0x00, sizeof(s_procIdx));
+	memset(s_unixSock, 0x00, sizeof(s_unixSock));
+	sprintf(s_procIdx , "%d", procIdx);
+	sprintf(s_unixSock , "%d", unixSock);
+	  
+	shmaddr = (s_newprocinfo *)atShm(shmid, 0);   
+	memset(nowDate, 0x00, sizeof(nowDate));
+	getDate(nowDate);
+	if (shmaddr == (s_newprocinfo *)NULL)
+	{
+		LOGGER(LOG_ERROR,  "atShm():SHARED MEMORY ATTACH FAILURE!(SHMKEY_ACQIF) procIdx[%d] shmid[%d]",  procIdx, shmid);
+		return ABNORMAL;
+    }  
+	LOGGER(LOG_DEBUG,  "THAI shmaddr[%d][%893.893s].", procIdx, shmaddr[procIdx]); // THAI
+	memcpy(&pNewPrcInfo, &shmaddr[procIdx], sizeof(pNewPrcInfo));
+	int ipid = atoi(pNewPrcInfo.pid);
+	if( ( ret = isAliveProcess((pid_t) ipid ) ) != 0 ){   
+		LOGGER(LOG_INFO,  "procIdx[%d]pid[%.10s] Is Terminated [%d]",  procIdx, pNewPrcInfo.pid, ret);
+		if(ret == -1){
+			memcpy(pstat,"D", 1);
+		}else{
+			memcpy(pstat,"R", 1);
+		}
+		
+	}  
+	if(memcmp(pstat, "D", 1) == 0){      
+		if ( fork() == 0 )      /* Child process */  
+		{
+			close(sockfd);
+			LOGGER(LOG_DEBUG,  "START CLIENT[%ld]  PID[%d:%d]",procIdx,getppid(),getpid());  
+
+			if (logfp) fclose(logfp);
+			setsid();
+			memcpy(pNewPrcInfo.pstat , 	"R", 	sizeof(pNewPrcInfo.pstat) );
+			sprintf(pNewPrcInfo.tcprvcnt , "%d", connfd);   
+			sprintf(pNewPrcInfo.pid , 		"%d", getpid());   
+			sprintf(pNewPrcInfo.pstrtdt, "%s", nowDate);
+			sprintf(pNewPrcInfo.pdowndt, "%s", nowDate);
+			memcpy(&shmaddr[procIdx], &pNewPrcInfo, sizeof(pNewPrcInfo));
+			detShm(shmaddr);
+  
+			char tmpStr[8 +1] = {0x00,};
+			sprintf(tmpStr , 		"%.8s", pNewPrcInfo.pidname);
+			execl(execmd, tmpStr, server_gb, s_procIdx, s_unixSock, hsm_svc_cnt, (char*)0);
+			stopProc();
+		}
+
+	}else if(memcmp(pstat, "R", 1) == 0){
+		LOGGER(LOG_DEBUG,  "Already Prcess Running [%.10s]stat[%.1s]downStemp[%.14s]", pNewPrcInfo.pid, pNewPrcInfo.pstat, pNewPrcInfo.pdowndt);
+		// int ipid = atoi(pNewPrcInfo.pid);
+		if (kill((pid_t)ipid, SIGTERM) == -1)
+		{
+			if( errno == ESRCH ){
+				LOGGER(LOG_DEBUG,  "kill():PROCESS WAS KILLED ipid[%d] [%d",  procIdx, ipid, errno);
+			}else{
+				LOGGER(LOG_ERROR,  "kill():PROCESS KILL FAILURE! procIdx[%d] ipid[%d] [%d",  procIdx, ipid, errno);
+				detShm(shmaddr);
+				return ABNORMAL;
+			}
+		}
+		if ( fork() == 0 )      /* Child process */
+		{
+			close(sockfd);
+			LOGGER(LOG_DEBUG,  "RESTART CLIENT[%ld]  PID[%d:%d]",procIdx,getppid(),getpid());  
+
+			if (logfp) fclose(logfp);
+			setsid();
+			memcpy(pNewPrcInfo.pstat , 	"R", 	sizeof(pNewPrcInfo.pstat) );
+			sprintf(pNewPrcInfo.tcprvcnt , "%d", connfd);
+			sprintf(pNewPrcInfo.pid , 		"%d", getpid());     
+			sprintf(pNewPrcInfo.pstrtdt, "%s", nowDate);
+			sprintf(pNewPrcInfo.pdowndt, "%s", nowDate);
+			memcpy(&shmaddr[procIdx], &pNewPrcInfo, sizeof(pNewPrcInfo));
+			detShm(shmaddr);
+			char tmpStr[8 +1] = {0x00,};
+			sprintf(tmpStr , 		"%.8s", pNewPrcInfo.pidname);
+			execl(execmd, tmpStr, server_gb, s_procIdx, s_unixSock, hsm_svc_cnt, (char*)0);
+			stopProc();
+		}
+      
+	}else { 
+		LOGGER(LOG_DEBUG,  "RUN CLIENT[%ld]  PID[%d:%d]",procIdx,getpid(), ipid);  
+		if(send_fd() != NORMAL ){
+			LOGGER(LOG_ERROR,  "Send Send_fd Faile procIdx[%d] [%d",  procIdx, errno);
+			return ABNORMAL;
+		}
+		memcpy(pNewPrcInfo.pstat , "R", sizeof(pNewPrcInfo.pstat) );  
+		sprintf(pNewPrcInfo.tcprvcnt , "%d", connfd);
+		sprintf(pNewPrcInfo.pstrtdt, "%s", nowDate);
+		sprintf(pNewPrcInfo.pdowndt, "%s", nowDate);
+		memcpy(&shmaddr[procIdx], &pNewPrcInfo, sizeof(pNewPrcInfo));
+		detShm(shmaddr);  
+		
+	}  
+	LOGGER(LOG_DEBUG,  " %ld Started .. ", procIdx);
+	LOGGER(LOG_DEBUG,  "THAI shmaddr[%d][%893.893s].", procIdx, shmaddr[procIdx]); // THAI
+	return NORMAL;
+  
+}
+
+int send_fd(){
+
+	struct msghdr msg = {0x00};
+	struct cmsghdr *cmsg;
+	char buff[CMSG_SPACE(sizeof(connfd))], dup[1];
+	memset(buff,0x00,sizeof(buff));
+	memset(dup,0x00,sizeof(dup));
+	struct iovec io;
+
+	msg.msg_iov = &io;
+	msg.msg_iovlen = 1;
+
+	msg.msg_control = buff;
+	msg.msg_controllen = sizeof(buff);
+	io.iov_base = &dup; 
+	io.iov_len = sizeof(dup);
+	cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(connfd));
+
+	memcpy(CMSG_DATA(cmsg), &connfd, sizeof(connfd));
+
+	if(sendmsg(writeUnixSocket,&msg,0) < 0){
+		LOGGER(LOG_ERROR,  "Send ConnectId to child fail connfd[%d] error[%d]",connfd, errno);  
+
+		return ABNORMAL;
+	}
+
+}
+
+int initUnixSocket(){
+
+	struct sockaddr_un unixAddr;   
+	memset(&unixAddr, 0x00, sizeof(unixAddr));
+	if((unixSock = socket(AF_UNIX, SOCK_DGRAM,0)) == -1 ){
+		LOGGER(LOG_ERROR,  "Set unixSock unix socket fail err[%d]", errno);
+		return ABNORMAL;
+	}
+
+	if((writeUnixSocket = socket(AF_UNIX, SOCK_DGRAM,0)) == -1 ){
+		LOGGER(LOG_ERROR,  "Set writeUnixSocket unix socket failerr[%d]",  errno);
+		return ABNORMAL;
+	}           
+
+	unixAddr.sun_family = AF_UNIX;
+	memcpy(unixAddr.sun_path, UNIX_SOCKET_PATH, sizeof(unixAddr.sun_path)- 1);
+    unlink(UNIX_SOCKET_PATH);
+	if(bind(unixSock, (struct sockaddr*)&unixAddr, sizeof(unixAddr)) < 0) {
+        LOGGER(LOG_ERROR,  "bind unixSock unix socket fail err[%d]", errno);
+		return ABNORMAL;
+    }     
+
+	if(connect(writeUnixSocket, (struct sockaddr*)&unixAddr, sizeof(unixAddr)) < 0) {
+        LOGGER(LOG_ERROR,  "connect writeUnixSocket socket fail [%d]", errno);
+		return ABNORMAL;
+    }
+
+}
+   
+int isAliveProcess(pid_t pid){
+	int status;
+	pid_t tmpPid;
+	while((tmpPid = waitpid(-1, &status, WNOHANG)) > 0)
+	{
+		LOGGER(LOG_DEBUG,  "CLEAR ZOMBIE PROCESS[%d]", tmpPid);
+	}
+	if( kill(pid,0) == 0 ){
+
+		LOGGER(LOG_DEBUG,  "Process [%d] existed", pid);
+		return 0;
+	}else{
+		if(errno == ESRCH){
+			LOGGER(LOG_DEBUG,  "Process [%d] does not exist", pid);
+			return -1;
+		}else{
+			LOGGER(LOG_DEBUG,  "Process [%d] Error", pid);
+			return -2;
+		}
+	}
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* ?Ô¼??Ì¸? : getConfigData                                                   */
+/* ??    ?? : get conf data                                                   */
+/* ?Ô·Âº??? : in : char* key, out : char* value                               */
+/*----------------------------------------------------------------------------*/
+int getKeyData(char* key, char* value)
+{
+EXEC SQL BEGIN DECLARE SECTION;
+	char c_value[200 + 1] = {0x00, };	
+	char c_key[20 + 1] = {0x00, };	
+EXEC SQL END DECLARE SECTION;
+
+	memcpy(c_key, key, strlen(key) );
+	logging(logfp, "%s] c_key : [%s", __func__, c_key);
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_CTT
+	  INTO :c_value
+	  FROM DBOWN.GAT_SWSCONF_INF
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = :c_key   
+	;
+
+	if (SQL_ERROR)
+	{
+		if (SQL_NOTFOUND)
+		{
+			logging(logfp, "%s] DATA NOT FOUND : [%s", __func__, c_key);
+			return ABNORMAL;
+		}
+
+		logging(logfp, "%s] SELECT SQL ERROR [%d", __func__, SQLCODE);
+		return ABNORMAL;
+	}
+
+	rtrimString(c_value);
+
+	memcpy(value, c_value, strlen(c_value) );
+	logging(logfp, "%s] c_value : [%s", __func__, c_value);
+	
+	return NORMAL;
+}
+
+
+int getConfigData(char* key, char* value)
+{
+EXEC SQL BEGIN DECLARE SECTION;
+	char c_value[200 + 1] = {0x00, };	
+	char c_key[20 + 1] = {0x00, };	
+EXEC SQL END DECLARE SECTION;
+
+	memcpy(c_key, key, strlen(key) );
+	logging(logfp, "%s] c_key : [%s", __func__, c_key);
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM
+	  INTO :c_value
+	  FROM DBOWN.GAT_SWSCONF_INF
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = :c_key   
+	;
+
+	if (SQL_ERROR)
+	{
+		if (SQL_NOTFOUND)
+		{
+			logging(logfp, "%s] DATA NOT FOUND : [%s", __func__, c_key);
+			return ABNORMAL;
+		}
+
+		logging(logfp, "%s] SELECT SQL ERROR [%d", __func__, SQLCODE);
+		return ABNORMAL;
+	}
+
+	rtrimString(c_value);
+
+	memcpy(value, c_value, strlen(c_value) );
+	logging(logfp, "%s] c_value : [%s", __func__, c_value);
+	
+	return NORMAL;
+}
+
+int loadDesKey()
+{
+	memset(AESClearKey, 0x00, sizeof(AESClearKey));
+	if (getKeyData("ZPK_AQC_AES", AESClearKey) == ABNORMAL)   
+		return ABNORMAL;    
+    return NORMAL;
+}
+
+int loadConfig(){
+
+	char port[4 + 1] = {0x00,};
+	memset(hsm_ip, 0x00, sizeof(hsm_ip));
+	if (getConfigData("HSM_HOSTPORT3", hsm_port) == ABNORMAL)   
+		return ABNORMAL;    
+
+	if (getConfigData("HSM_HOSTADDR3", hsm_ip) == ABNORMAL)   
+		return ABNORMAL;    
+	
+	if (getConfigData("HSM_INST_CNT", hsm_svc_cnt) == ABNORMAL)   
+		return ABNORMAL;    
+    return NORMAL;
+
+}
+
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : getLogLevel()                                                     */
+/* SUBJECT  : Get log level                                                   */
+/* ARGUMENT :                                                                 */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int getLogLevel()
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		char loglevel[80] = {0x00, };
+	EXEC SQL END DECLARE SECTION;
+
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM
+	  INTO :loglevel
+	  FROM DBOWN.GAT_SWSCONF_INF
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = 'ACQ_LOGLVL'	
+	;    
+
+	if (SQL_ERROR)
+	{
+		custLoglevel = LOG_INFO;
+		LOGGER(LOG_ERROR, "SELECT SQL ERROR [%d", SQLCODE);
+	}else{
+		trimString(loglevel);
+		custLoglevel = atoi(loglevel);
+	}
+
+	return NORMAL;
+}
+
+
+int IsAvaibleToRead(int socket_id){
+	char peek_buff[1];
+	fd_set rset;
+	struct timeval tval;
+	int chkIdx, ret;
+	for ( chkIdx = 0; chkIdx < 5; chkIdx++ ) {
+		tval.tv_sec  = 60 ;   
+		tval.tv_usec = 0 ;  
+		FD_ZERO(&rset);   
+		FD_SET(socket_id , &rset);   
+		ret = select(socket_id+1 , &rset , (fd_set *)NULL , (fd_set *)NULL , &tval);
+		if ( (ret > 0) && (FD_ISSET(socket_id, &rset)) ) {
+			int bytes = recv(socket_id, peek_buff,1, MSG_PEEK);
+			if( bytes > 0 ) return 1;
+		} 
+	}
+	LOGGER(LOG_INFO,  "No Available Data To Read"," ");
+	return -1;
+	
+}
+/*----------------------------------------------------------------------------*/
+/*                            END  OF  PROGRAM                                */
+/*----------------------------------------------------------------------------*/
+
+	

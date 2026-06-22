@@ -1,0 +1,384 @@
+/*----------------------------------------------------------------------------/*
+/* PROGRAM NM : smartifo.c                                                    */
+/* PROCESS NM : smartifo                                                      */
+/* SUBJECT    : DP Interface Process (DP -> SCB)                              */
+/* Programmer : ChangKoo Lee                                                  */
+/* Target User: Shinhan Vietnam BANK                                          */
+/* Description: Copyright (C) 2008 NAUTILUS HYOSUNG. Ltd                      */
+/*              All rights Reserved                                           */
+/*----------------------------------------------------------------------------*/
+/* VERSION    DATE         NAME      COMMENT                                  */
+/*----------------------------------------------------------------------------*/
+/* V1.00      2008.07.13   CKLEE     FIRST CODING                             */
+/*----------------------------------------------------------------------------*/
+#define MAINSRC
+#include "defcom.h"
+#include "dpifcom.h"
+#include "dbdefine.h"
+
+#define CHILD_PROC_ID_LEN (2)
+#define CHILD_PROC_NM_LEN (10)
+#define CHILD_PROC_EXE_ID_BEG (0)
+#define CHILD_PROC_EXE_ID_END (99)
+
+EXEC SQL INCLUDE SQLCA;
+
+int CProcTotCnt = 0;
+pid_t CPid = -1;
+char ExeName[12 + 1];
+char ServerGb[1 + 1];
+char NowDate[15 + 1];
+
+void signalHandler();
+/*----------------------------------------------------------------------------*/
+/* Function Name : main()                                                     */
+/* Description   :                                                            */
+/*----------------------------------------------------------------------------*/
+main(argc, argv)
+int argc;
+char *argv[];
+{
+	FILE* fp = NULL;
+	int cnt;
+	int cntMax;
+	int cProcExeId = -1;
+	char *chptr;
+	char runPath[50 + 1];
+	char exeCmd[50 + 1];
+	char exePath[50 + 1];
+	char childProcName[10 + 1]; // CHILD_PROC_NM_LEN
+	
+	//
+	memset(ExeName , 0x00 , sizeof(ExeName));
+	memcpy(ExeName , ((chptr = strrchr(argv[0], '/')) != NULL) ? chptr+1 : argv[0] , sizeof(ExeName)-1);
+	CPid = getpid();
+	initLogging();
+	initSignal();
+	//
+	memset(ServerGb , 0x00 , sizeof(ServerGb));
+	if (argc == 1) {
+		memcpy(ServerGb , "Z" , sizeof(ServerGb)-1);
+	} else if (argc == 2) {
+		memcpy(ServerGb , argv[1] , sizeof(ServerGb)-1);
+	} else if (argc == 3) {
+		memcpy(ServerGb , argv[1] , sizeof(ServerGb)-1);
+		errno = 0;
+		cnt = strtol(argv[2], &chptr, 10);
+		if (errno == ERANGE || argv[2] == chptr || cnt < CHILD_PROC_EXE_ID_BEG || cnt > CHILD_PROC_EXE_ID_END) {
+			logging(logfp, "%d][%s:%d][ERROR] Invalid cProcExeId[%s", CPid, __func__, __LINE__, argv[2]);
+			stopProc();
+		}
+		cProcExeId = cnt;
+	} else {
+		logging(logfp, "%d][%s:%d][ERROR] Invalid argument count[%d", CPid, __func__, __LINE__, argc);
+		stopProc();
+	}
+	logging(logfp, "%d][%s:%d] ExeName : ServerGb cProcExeId[ %s : %s %d", CPid, __func__, __LINE__, ExeName, ServerGb, cProcExeId);
+	//
+	memset(runPath , 0x00 , sizeof(runPath));
+	fp = popen("pwd", "r");
+	fgets(runPath, sizeof(runPath)-1, fp);
+	pclose(fp);
+	runPath[strlen(runPath)-1] = '';
+	rtrimString(runPath);
+	logging(logfp, "%d][%s:%d] run path : [%s", CPid, __func__, __LINE__, runPath);
+	//
+	for (cnt = 1; cnt <= 100; cnt++) {
+		if (ora_db_connect("atmdba") != 0) {
+			if (cnt % 10 == 1) {
+				logging(logfp, "%d][%s:%d] DB Connect ERROR", CPid, __func__, __LINE__);
+			}
+		} else {
+			logging(logfp, "%d][%s:%d] DB Connect SUCCESS ", CPid, __func__, __LINE__);
+			break;
+		}
+		if (cnt >= 100) {
+			stopProc();
+		}
+		sleep(1);
+	}
+	//
+	if (loadHostInfo() == ABNORMAL) {
+		logging(logfp, "%d][%s:%d][ERROR] Not Found", CPid, __func__, __LINE__);
+	   	stopProc();
+	}
+	if (CProcTotCnt <= cProcExeId) {
+		logging(logfp, "%d][%s:%d][ERROR] CProcTotCnt[%d] <= cProcExeId[%d", CPid, __func__, __LINE__, CProcTotCnt, cProcExeId);
+	   	stopProc();
+	}
+	// Init data
+	memset(exePath , 0x00 , sizeof(exePath));
+	snprintf(exePath, sizeof(exePath), "%s/%sxx", runPath, ExeName);
+	memset(exeCmd , 0x00 , sizeof(exeCmd));
+	if (cProcExeId < 0) {
+		cnt = CHILD_PROC_EXE_ID_BEG;
+		cntMax = CProcTotCnt;
+		snprintf(exeCmd, sizeof(exeCmd), "pkill %sxx", ExeName);
+	} else {
+		cnt = cProcExeId;
+		cntMax = cnt + 1;
+		snprintf(exeCmd, sizeof(exeCmd), "pidof %s%0*d | awk '{print "kill "$1}' | sh", ExeName, CHILD_PROC_ID_LEN, cProcExeId);
+	}
+	// Kill child process
+	system(exeCmd);
+	logging(logfp, "%d][%s:%d][DBUG] EXEC COMMAND[%s", CPid, __func__, __LINE__, exeCmd);
+	sleep(1);
+	// Start all child processes
+	for (cnt; cnt < cntMax; cnt++) {
+		// Get child process name
+		memset(childProcName , 0x00 , sizeof(childProcName));
+		if (getChildProcName(cnt, &childProcName) == ABNORMAL) {
+			logging(logfp, "%d][%s:%d][ERROR] getChildProcName() childProcIdx[%d", CPid, __func__, __LINE__, cnt);
+			stopProc();
+		}
+		// Start child process
+		pid_t cp = fork();
+		if (cp < 0) {
+			logging(logfp, "%d][%s:%d][ERROR] START CHILD PROCESS[%s", CPid, __func__, __LINE__, childProcName);
+			stopProc();
+		} else if (cp == 0) {
+			logging(logfp, "%d][%s:%d][DBUG] START CHILD PROCESS[%s]PID[%d", CPid, __func__, __LINE__, childProcName, getpid());  
+			execl(exePath, childProcName, ServerGb, (char*)NULL);
+			stopProc();
+		}
+	}
+	//
+	stopProc();      
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : getChildProcName()                                             */
+/* Description   : DP SERVER INFO LOADING (dpifcli.conf file loading)         */
+/*----------------------------------------------------------------------------*/
+int getChildProcName(int procIdx, char *procName)
+{
+EXEC SQL BEGIN DECLARE SECTION;
+	char procId[2 + 1] = {0x00, }; // CHILD_PROC_ID_LEN
+	char procNm[10 + 1] = {0x00, }; // CHILD_PROC_NM_LEN
+EXEC SQL END DECLARE SECTION;
+	snprintf(procId, sizeof(procId), "%0*d", CHILD_PROC_ID_LEN, procIdx);
+	EXEC SQL
+	SELECT ATM_ESTBLS_NM INTO :procNm
+	FROM DBOWN.GAT_SWSCONF_INF   
+	WHERE SH_LCL_CORP_C = 130
+		AND ATM_ESTBLS_TRX_C = 'IBT_O_V2_PROC'
+		AND ATM_ESTBLS_ID = :procId
+	;
+	if (SQL_ERROR) {
+		if (SQL_NOTFOUND) {
+			logging(logfp, "%d][%s:%d][ERROR] DATA NOT FOUND IBT_O_PROC procId[%s", CPid, __func__, __LINE__, procId);
+		} else {
+			logging(logfp, "%d][%s:%d][ERROR] SELECT SQL ERRORCODE[%d", CPid, __func__, __LINE__, SQLCODE);
+		}
+		return ABNORMAL;
+	}
+	memcpy(procName, procNm, CHILD_PROC_NM_LEN);
+	return NORMAL;
+}
+  
+/*----------------------------------------------------------------------------*/
+/* Function Name : loadHostInfo()                                             */
+/* Description   : DP SERVER INFO LOADING (dpifcli.conf file loading)         */
+/*----------------------------------------------------------------------------*/
+int loadHostInfo()
+{
+EXEC SQL BEGIN DECLARE SECTION;   
+	int  hostCnt = 0;
+	char temp[30 + 1];
+EXEC SQL END DECLARE SECTION;
+	// Get HOSTCOUNT
+	memset(temp, 0x00, sizeof(temp));
+	memcpy(temp, "DP_IBT_O_V2_CNT", sizeof(temp)-1);
+	rtrimString(temp);
+	logging(logfp, "%d][%s:%d] Get host info : [%s", CPid, __func__, __LINE__, temp);
+
+	EXEC SQL
+	SELECT TO_NUMBER(ATM_ESTBLS_NM)
+	  INTO :hostCnt
+	  FROM DBOWN.GAT_SWSCONF_INF
+	 WHERE SH_LCL_CORP_C = 130
+	   AND ATM_ESTBLS_TRX_C = 'CONF'
+	   AND ATM_ESTBLS_ID = :temp
+	;
+	if (SQL_ERROR) {
+		if (SQLCODE == -3114 ) {
+			if (ora_db_connect("atmdba") != 0) {
+				logging(logfp, "%d][%s:%d] DB Reconnect ERROR ", CPid, __func__, __LINE__);
+			} else {
+				logging(logfp, "%d][%s:%d] DB Reconnect Success ", CPid, __func__, __LINE__);
+			}
+		}
+		if (SQL_NOTFOUND) {
+			logging(logfp, "%d][%s:%d] SELECT NOT FOUND DATE", CPid, __func__, __LINE__);
+		} else {
+			logging(logfp, "%d][%s:%d] SELECT SQL ERROR [%d", CPid, __func__, __LINE__, SQLCODE);
+		}
+		return ABNORMAL;
+	}
+	CProcTotCnt = hostCnt;
+	logging(logfp, "%d][%s:%d] HOSTCOUNT : [%d", CPid, __func__, __LINE__, CProcTotCnt);
+
+	return NORMAL;
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : initSignal()                                               */
+/* Description   : System Signal Initial Processing                           */
+/*----------------------------------------------------------------------------*/
+void initSignal()
+{
+	signal(SIGHUP ,   SIG_IGN    ); /* Hangup (01)                            */
+	signal(SIGINT ,   SIG_IGN    ); /* Interrupt (02)                         */
+	signal(SIGILL ,   SIG_IGN    ); /* Illegal instruction (04)               */
+	signal(SIGTRAP,   SIG_IGN    ); /* Trace trap (05)                        */
+	signal(SIGFPE ,   SIG_IGN    ); /* Floating point exception (08)          */
+	signal(SIGALRM,   signalHandler); /* Alarm Clock (14)                 */
+	signal(SIGUSR1,   SIG_IGN    ); /* User Signal 1 (16) : Process down      */
+	signal(SIGUSR2,   SIG_IGN    ); /* User Signal 2 (17) : reserved          */
+	signal(SIGCHLD,   SIG_IGN    ); /* Child proc. terminated or stopped(18)  */
+	signal(SIGIO  ,   SIG_IGN    ); /* asynchronous I/O (22)                  */
+	signal(SIGTSTP,   SIG_IGN    ); /* Interactive stop signal (25)           */
+	signal(SIGCONT,   SIG_IGN    ); /* Continue if stopped (26)               */
+	signal(SIGTTIN,   SIG_IGN    ); /* Read from control terminal (27)        */
+	signal(SIGTTOU,   SIG_IGN    ); /* Write to control terminal (28)         */
+	signal(SIGURG ,   SIG_IGN    ); /* urgent condition on IO channel (29)    */
+	signal(SIGPIPE,   SIG_IGN    ); /* Pipe error (13)                        */
+	signal(SIGABRT,   signalHandler); /* Process abort (06)                     */
+	signal(SIGTERM,   signalHandler);
+	signal(SIGQUIT,   signalHandler);
+	signal(SIGSTOP,   signalHandler); /* Stop signal (24)                       */
+	signal(SIGKILL,   signalHandler); /* Process Close Signal                   */
+	signal(SIGBUS ,   signalHandler); /* Bus error (10)                         */
+	signal(SIGSEGV,   signalHandler); /* Segmentation Violation (11)            */
+	signal(SIGSYS ,   signalHandler); /* Bad argument to system call (12)       */
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : initLogging                                                */
+/* Description   : Log & Debug File Create                                    */
+/*----------------------------------------------------------------------------*/
+int initLogging()
+{
+	char logpath[80];
+
+	memset(NowDate , 0x00, sizeof(NowDate));
+	if (getDate(NowDate) == ABNORMAL) stopProc();
+
+	/*-------------------------------------------------------------------*/
+	/* ?��α׷? Log File ????                                            */
+	/*-------------------------------------------------------------------*/
+	if (logfp != (FILE *)NULL) fclose(logfp);
+	logfp = (FILE *)initLogFile(ExeName, "a+");
+	if (logfp == (FILE *)NULL) {
+		stopProc();
+	}
+
+	logging(logfp, "%d][DEBUG]>>>>>>>>>>>>[[ Debug Starting ]]................", CPid);
+	logging(logfp, "%d][LOGG]>>>>>>>>>>>>[[ Log Starting ]]..................", CPid);
+
+	return NORMAL;
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : stopProc()                                                 */
+/* Description   : Main Process Stop and Socket Close and Program Exit        */
+/*----------------------------------------------------------------------------*/
+void stopProc()
+{
+	// DB Disconnect
+	EXEC SQL ROLLBACK WORK RELEASE;
+	logging(logfp, "%d][%s:%d] DB Disconnected .. ", CPid, __func__, __LINE__);
+
+	/*-------------------------------------------------------------------*/
+	/* PROGRAM DOWN INFO UPDATE TO SHARED MEMORY                         */
+	/*-------------------------------------------------------------------*/
+	if (logfp != (FILE *)NULL) {
+		logging(logfp,"%d][LOGG]>>>>>> PROCESS SHUTDOWN COMPLETE............[OK]", CPid);
+		logging(logfp,"%d][LOGG]............[[ END OF LOGGING ]]................", CPid);
+		fclose(logfp);
+	}
+
+	exit(0);
+}
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : alarm_handler                                                   */
+/* SUBJECT  :                                                                 */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+int alarm_handler()
+{
+	logging(logfp, "%d][%s:%d] called !!", CPid, __func__, __LINE__);
+	signal(SIGALRM, alarm_handler);
+
+	return NORMAL;
+}
+/*----------------------------------------------------------------------------*/
+/* Function Name : signalHandler()                                            */
+/* Description   : Signal handler                                             */
+/*----------------------------------------------------------------------------*/
+void signalHandler(int signo){
+	switch(signo){
+		case SIGALRM :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGALRM");
+			alarm_handler();
+			break;
+		case SIGABRT :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGABRT");
+			stopProc_sig();
+			break;
+		case SIGQUIT :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGQUIT");
+			stopProc_sig();
+			break;
+		case SIGSTOP :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGSTOP");
+			stopProc_sig();
+			break;
+		case SIGKILL :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGKILL");
+			stopProc_sig();
+			break;
+		case SIGBUS :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGBUS");
+			stopProc_sig();
+			break;
+		case SIGSEGV :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGSEGV");
+			stopProc_sig();
+			break;
+		case SIGSYS :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGSYS");
+			stopProc_sig();
+			break;
+		case SIGTERM :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGTERM");
+			stopProc_sig();
+			break;
+		case SIGCHLD :
+			logging(logfp, "%d][%s:%d] signo : [%d : %s", CPid, __func__, __LINE__, signo, "SIGCHLD");
+			stopProc_sig();
+			break;
+		default :
+			break;
+	}
+}
+/*----------------------------------------------------------------------------*/
+/* FUNCTION : stopProc_sig                                                   */
+/* SUBJECT  :                                                                 */
+/* RETURN   : SUCCESS: NORMAL                                                 */
+/*----------------------------------------------------------------------------*/
+void stopProc_sig()
+{
+	EXEC SQL ROLLBACK WORK RELEASE;
+	logging(logfp, "%d][%s:%d] DB Disconnected ..", CPid, __func__, __LINE__);
+
+	/*-------------------------------------------------------------------*/
+	/* PROGRAM DOWN INFO UPDATE TO SHARED MEMORY                         */
+	/*-------------------------------------------------------------------*/
+	if (logfp != (FILE *)NULL) {
+		logging(logfp,"%d][LOGG]>>>>>> PROCESS SHUTDOWN COMPLETE............[OK]", CPid);
+		logging(logfp,"%d][LOGG]............[[ END OF LOGGING ]]................", CPid);
+		fclose(logfp);
+	}
+
+	exit(0);
+}
+/*----------------------------------------------------------------------------*/
+/*                            END  OF  PROGRAM                                */
+/*----------------------------------------------------------------------------*/
