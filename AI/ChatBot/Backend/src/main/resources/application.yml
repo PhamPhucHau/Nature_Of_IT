@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: chatbot-backend
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  
+  datasource:
+    url: jdbc:postgresql://localhost:5432/chatbot
+    username: chatbot_user
+    password: chatbot_password
+    driver-class-name: org.postgresql.Driver
+  
+  profiles:
+    active: dev
+
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+logging:
+  level:
+    root: INFO
+    com.chatbot: DEBUG
+    org.springframework.web: DEBUG
+  pattern:
+    console: "[%X{requestId}] %d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    file: "[%X{requestId}] %d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/application.log
+
+ollama:
+  api:
+    url: http://localhost:11434
+    timeout: 300
+  
+  models:
+    - name: llama2
+      display: "Llama 2"
+    - name: mistral
+      display: "Mistral"
+    - name: neural-chat
+      display: "Neural Chat"
+
+---
+
+spring:
+  config:
+    activate:
+      on-profile: dev
+  
+  datasource:
+    url: jdbc:h2:mem:testdb
+    driver-class-name: org.h2.Driver
+  
+  h2:
+    console:
+      enabled: true
+
+---
+
+spring:
+  config:
+    activate:
+      on-profile: prod
+  
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+logging:
+  level:
+    root: WARN
+    com.chatbot: INFO
